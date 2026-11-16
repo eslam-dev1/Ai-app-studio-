@@ -72,6 +72,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -3066,6 +3067,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 onProgress = { msg -> _cloudBuildProgress.value = msg }
             )
             if (apkFile != null && apkFile.exists() && apkFile.length() > 0L) {
+                val sizeFormatted = formatApkFileSize(apkFile.length())
+                _snackbarMessage.value = "Build Complete: ${apkFile.name} ($sizeFormatted)"
                 val uri = androidx.core.content.FileProvider.getUriForFile(
                     getApplication(),
                     "${getApplication<Application>().packageName}.fileprovider",
@@ -3074,7 +3077,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 appendConsoleLog(
                     level = ConsoleLogLevel.SUCCESS,
                     tag = "ApkInstaller",
-                    message = "Downloaded ${apkFile.name} (${apkFile.length() / 1024} KB). Launching Android Package Installer…"
+                    message = "Downloaded ${apkFile.name} ($sizeFormatted). Launching Android Package Installer…"
                 )
                 uri
             } else {
@@ -3120,6 +3123,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             .replace(Regex("[^a-z0-9]+"), "-")
             .trim('-')
             .ifBlank { "app" }
+
+    fun formatApkFileSize(bytes: Long): String {
+        if (bytes <= 0L) return "0 KB"
+        val kb = bytes / 1024.0
+        val mb = kb / 1024.0
+        return if (mb >= 1.0) {
+            String.format(java.util.Locale.US, "%.1f MB", mb)
+        } else {
+            "${bytes / 1024} KB"
+        }
+    }
 
     private fun refreshOfflineSigningStatus(project: StudioProject?) {
         if (project == null) {
@@ -3368,12 +3382,28 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 refreshOfflineSigningStatus(savedProject)
                 appendConsoleEntries(diagnostics)
 
-                _snackbarMessage.value = finalStatus
+                val completedApkFile = when {
+                    signedReady && signedOutputApk.exists() && signedOutputApk.length() > 0L -> signedOutputApk
+                    cachedUnsignedOrDebugApk.exists() && cachedUnsignedOrDebugApk.length() > 0L -> cachedUnsignedOrDebugApk
+                    else -> null
+                }
+                val buildCompleteMsg = if (completedApkFile != null) {
+                    val sizeFormatted = formatApkFileSize(completedApkFile.length())
+                    "Build Complete: ${completedApkFile.name} ($sizeFormatted)"
+                } else {
+                    "Build Complete: $finalStatus"
+                }
+
+                _snackbarMessage.value = buildCompleteMsg
                 FactoryBuildService.showCompletionNotification(
                     getApplication(),
-                    "Offline Build & Sign Complete",
-                    finalStatus
+                    "Build Complete",
+                    if (completedApkFile != null) {
+                        "${completedApkFile.name} (${formatApkFileSize(completedApkFile.length())})"
+                    } else finalStatus
                 )
+                _offlineBuildProgress.value = buildCompleteMsg
+                delay(1500L)
             } catch (ex: Exception) {
                 appendConsoleLog(
                     level = ConsoleLogLevel.ERROR,
@@ -3483,12 +3513,16 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 tag = "ApkSigner",
                 message = "Signed ${signedFile.name} offline (${signedFile.length() / 1024} KB) • SHA-256=${verifyResult.sha256Fingerprint} • v1=${verifyResult.v1Verified}, v2=${verifyResult.v2Verified}, v3=${verifyResult.v3Verified}"
             )
-            _snackbarMessage.value = "APK signed & verified offline — launching installer"
+            val sizeFormatted = formatApkFileSize(signedFile.length())
+            _snackbarMessage.value = "Build Complete: ${signedFile.name} ($sizeFormatted)"
             FactoryBuildService.showCompletionNotification(
                 app,
-                "Offline APK Signed & Verified",
-                "Signed ${signedFile.name} (${signedFile.length() / 1024} KB) verified v1+v2+v3"
+                "Build Complete",
+                "Signed ${signedFile.name} ($sizeFormatted) verified v1+v2+v3"
             )
+
+            _offlineBuildProgress.value = "Build Complete: ${signedFile.name} ($sizeFormatted)"
+            delay(1500L)
 
             androidx.core.content.FileProvider.getUriForFile(
                 app,

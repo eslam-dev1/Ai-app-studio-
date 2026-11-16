@@ -31,6 +31,7 @@ import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StarterTemplatesScreen
 import com.example.ui.screens.WorkspaceScreen
 import com.example.viewmodel.StudioViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
@@ -96,6 +97,7 @@ fun AppNavGraph(
 
     LaunchedEffect(generationState) {
         val success = generationState as? GenerationUiState.Success ?: return@LaunchedEffect
+        delay(1200L)
         studioViewModel.resetGenerationState()
         navController.navigate(WorkspaceRoute(success.projectId))
     }

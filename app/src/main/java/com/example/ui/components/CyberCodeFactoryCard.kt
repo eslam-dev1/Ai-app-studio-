@@ -1,5 +1,7 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -7,6 +9,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -47,6 +54,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -91,12 +100,17 @@ fun CyberCodeFactoryCard(
         2 -> 0.85f
         else -> 0.96f
     },
+    isSuccess: Boolean = progress >= 0.999f,
     onCancel: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val palette = LocalStudioCyberPalette.current
-    val activeNodeIndex = remember(buildPhase) {
-        FactoryTelemetryCalculator.activeNodeForPhase(buildPhase)
+    val isMilestoneComplete = isSuccess || progress >= 0.999f ||
+        stepMessage.startsWith("Build Complete", ignoreCase = true) ||
+        stepMessage.startsWith("Build Succeeded", ignoreCase = true)
+
+    val activeNodeIndex = remember(buildPhase, isMilestoneComplete) {
+        if (isMilestoneComplete) 2 else FactoryTelemetryCalculator.activeNodeForPhase(buildPhase)
     }
 
     // Glowing cyan cursor blink
@@ -121,13 +135,13 @@ fun CyberCodeFactoryCard(
     )
 
     // Real execution progress (0.0f..1.0f) interpolated cleanly from ViewModel/service telemetry
-    val clampedProgress = progress.coerceIn(0f, 1f)
+    val clampedProgress = if (isMilestoneComplete) 1f else progress.coerceIn(0f, 1f)
     val animatedProgress by animateFloatAsState(
         targetValue = clampedProgress,
         animationSpec = tween(durationMillis = 250, easing = LinearEasing),
         label = "factory_real_progress"
     )
-    val percentInt = (animatedProgress * 100f).toInt().coerceIn(0, 100)
+    val percentInt = if (isMilestoneComplete) 100 else (animatedProgress * 100f).toInt().coerceIn(0, 100)
 
     val sanitizedCode = remember(streamingCode) {
         FactoryTelemetryCalculator.sanitizeStreamingCode(streamingCode)
@@ -158,7 +172,7 @@ fun CyberCodeFactoryCard(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. Card Header: "BUILDING [ProjectName]..." + Live Engine & Phase + Cancel
+            // 1. Card Header: "BUILDING [ProjectName]..." / "BUILD SUCCEEDED" + Live Engine & Phase + Cancel/Badge
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -169,23 +183,58 @@ fun CyberCodeFactoryCard(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
-                        text = "BUILDING ${projectName.ifBlank { "APPSTUDIO" }.uppercase()}...",
+                        text = if (isMilestoneComplete) {
+                            "BUILD SUCCEEDED"
+                        } else {
+                            "BUILDING ${projectName.ifBlank { "APPSTUDIO" }.uppercase()}..."
+                        },
                         style = MaterialTheme.typography.titleSmall,
                         fontFamily = JetBrainsMonoFamily,
                         fontWeight = FontWeight.Bold,
-                        color = palette.accentCyan,
+                        color = if (isMilestoneComplete) palette.accentEmerald else palette.accentCyan,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "$engineLabel • $liveStatusOperation",
+                        text = if (isMilestoneComplete) {
+                            "Milestone reached • $liveStatusOperation"
+                        } else {
+                            "$engineLabel • $liveStatusOperation"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                if (onCancel != null) {
+                if (isMilestoneComplete) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(CyberEmerald.copy(alpha = 0.18f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("factory_milestone_badge")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(CyberEmerald)
+                            )
+                            Text(
+                                text = "SUCCESS",
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                color = palette.accentEmerald
+                            )
+                        }
+                    }
+                } else if (onCancel != null) {
                     IconButton(
                         onClick = onCancel,
                         modifier = Modifier
@@ -213,11 +262,11 @@ fun CyberCodeFactoryCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 serverNodes.forEachIndexed { idx, label ->
-                    val isActive = idx == activeNodeIndex
-                    val isCompleted = idx < activeNodeIndex
+                    val isActive = !isMilestoneComplete && idx == activeNodeIndex
+                    val isCompleted = isMilestoneComplete || idx < activeNodeIndex
                     val stateDescription = when {
+                        isMilestoneComplete || isCompleted -> "$label completed"
                         isActive -> "$label active"
-                        isCompleted -> "$label completed"
                         else -> "$label pending"
                     }
                     Row(
@@ -233,8 +282,8 @@ fun CyberCodeFactoryCard(
                                 .clip(CircleShape)
                                 .background(
                                     when {
+                                        isMilestoneComplete || isCompleted -> CyberEmerald
                                         isActive -> CyberEmerald
-                                        isCompleted -> CyberCyan.copy(alpha = 0.75f)
                                         else -> CyberEmerald.copy(alpha = 0.22f)
                                     }
                                 )
@@ -243,10 +292,10 @@ fun CyberCodeFactoryCard(
                             text = label,
                             fontFamily = JetBrainsMonoFamily,
                             fontSize = 10.sp,
-                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                            fontWeight = if (isActive || isMilestoneComplete) FontWeight.Bold else FontWeight.Medium,
                             color = when {
+                                isMilestoneComplete || isCompleted -> palette.accentEmerald
                                 isActive -> palette.accentEmerald
-                                isCompleted -> palette.accentCyan
                                 else -> MaterialTheme.colorScheme.onSurfaceVariant
                             }
                         )
@@ -254,21 +303,45 @@ fun CyberCodeFactoryCard(
                 }
             }
 
-            // 3. Compact Rotating Dual-Gear Assembly above the transparent code viewport
+            // 3. Compact Rotating Dual-Gear Assembly / Glowing Success Milestone Ring
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(64.dp),
+                    .height(68.dp),
                 contentAlignment = Alignment.Center
             ) {
-                DualInterlockingGears(
-                    purpleColor = CyberPurple,
-                    cyanColor = CyberCyan,
-                    modifier = Modifier
-                        .width(128.dp)
-                        .height(64.dp)
-                        .testTag("factory_dual_gears")
-                )
+                AnimatedContent(
+                    targetState = isMilestoneComplete,
+                    transitionSpec = {
+                        (fadeIn(animationSpec = tween(380)) +
+                            scaleIn(initialScale = 0.82f, animationSpec = tween(380)))
+                            .togetherWith(
+                                fadeOut(animationSpec = tween(280)) +
+                                    scaleOut(targetScale = 1.15f, animationSpec = tween(280))
+                            )
+                    },
+                    label = "factory_gear_or_success_switch"
+                ) { isSuccessActive ->
+                    if (isSuccessActive) {
+                        GlowingSuccessRing(
+                            emeraldColor = CyberEmerald,
+                            cyanColor = CyberCyan,
+                            modifier = Modifier
+                                .width(140.dp)
+                                .height(68.dp)
+                                .testTag("factory_success_ring")
+                        )
+                    } else {
+                        DualInterlockingGears(
+                            purpleColor = CyberPurple,
+                            cyanColor = CyberCyan,
+                            modifier = Modifier
+                                .width(128.dp)
+                                .height(64.dp)
+                                .testTag("factory_dual_gears")
+                        )
+                    }
+                }
             }
 
             // 4. Borderless & Transparent Code Stream Container (floats seamlessly on translucent card)
@@ -357,7 +430,11 @@ fun CyberCodeFactoryCard(
                             .clip(RoundedCornerShape(50))
                             .background(
                                 Brush.horizontalGradient(
-                                    colors = listOf(CyberPurple, CyberCyan, CyberEmerald),
+                                    colors = if (isMilestoneComplete) {
+                                        listOf(CyberEmerald, Color(0xFF00FF9D), CyberCyan)
+                                    } else {
+                                        listOf(CyberPurple, CyberCyan, CyberEmerald)
+                                    },
                                     startX = waveShift - 300f,
                                     endX = waveShift + 500f
                                 )
@@ -393,6 +470,152 @@ fun CyberCodeFactoryCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun GlowingSuccessRing(
+    emeraldColor: Color,
+    cyanColor: Color,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "success_ring_pulse")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.96f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_scale"
+    )
+    val glowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.40f,
+        targetValue = 0.90f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glow_alpha"
+    )
+    val ringRotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(4500, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "ring_rotation"
+    )
+    val shockwaveProgress by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "shockwave_progress"
+    )
+
+    Canvas(
+        modifier = modifier
+            .semantics { contentDescription = "Build Successful Glowing Green Ring" }
+    ) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val baseRadius = (size.height / 2f) * 0.70f
+
+        // 1. Expanding outer shockwave ripple ring
+        val shockwaveRadius = baseRadius + (shockwaveProgress * baseRadius * 0.65f)
+        val shockwaveAlpha = (1f - shockwaveProgress).coerceIn(0f, 1f) * 0.40f
+        drawCircle(
+            color = emeraldColor.copy(alpha = shockwaveAlpha),
+            radius = shockwaveRadius,
+            center = center,
+            style = Stroke(width = 2.4f)
+        )
+
+        // 2. Soft outer glow bloom layers
+        drawCircle(
+            color = emeraldColor.copy(alpha = glowAlpha * 0.14f),
+            radius = baseRadius * 1.35f * pulseScale,
+            center = center
+        )
+        drawCircle(
+            color = emeraldColor.copy(alpha = glowAlpha * 0.28f),
+            radius = baseRadius * 1.15f * pulseScale,
+            center = center
+        )
+
+        // 3. Inner translucent background disc
+        drawCircle(
+            color = emeraldColor.copy(alpha = 0.18f),
+            radius = baseRadius * pulseScale,
+            center = center
+        )
+
+        // 4. Rotating sweep-gradient glowing green ring
+        rotate(degrees = ringRotation, pivot = center) {
+            val ringBrush = Brush.sweepGradient(
+                colors = listOf(
+                    emeraldColor,
+                    Color(0xFF00FF9D),
+                    cyanColor,
+                    Color(0xFF00E676),
+                    emeraldColor
+                ),
+                center = center
+            )
+            drawCircle(
+                brush = ringBrush,
+                radius = baseRadius * pulseScale,
+                center = center,
+                style = Stroke(width = 4.2f)
+            )
+        }
+
+        // 5. Crisp inner core highlight ring
+        drawCircle(
+            color = Color.White.copy(alpha = 0.85f),
+            radius = baseRadius * 0.94f * pulseScale,
+            center = center,
+            style = Stroke(width = 1.2f)
+        )
+
+        // 6. Centered Checkmark Path
+        val checkPath = Path().apply {
+            val checkSize = baseRadius * 0.54f
+            val startX = center.x - checkSize * 0.52f
+            val startY = center.y - checkSize * 0.05f
+            val midX = center.x - checkSize * 0.10f
+            val midY = center.y + checkSize * 0.38f
+            val endX = center.x + checkSize * 0.54f
+            val endY = center.y - checkSize * 0.38f
+
+            moveTo(startX, startY)
+            lineTo(midX, midY)
+            lineTo(endX, endY)
+        }
+
+        // Checkmark shadow/glow
+        drawPath(
+            path = checkPath,
+            color = emeraldColor.copy(alpha = 0.85f),
+            style = Stroke(
+                width = 5.4f,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+        )
+        // Checkmark crisp inner line
+        drawPath(
+            path = checkPath,
+            color = Color.White,
+            style = Stroke(
+                width = 3.2f,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+        )
     }
 }
 

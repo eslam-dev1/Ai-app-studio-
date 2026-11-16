@@ -440,4 +440,54 @@ class CyberCodeFactoryRobolectricTest {
             openedFilePath
         )
     }
+
+    @Test
+    fun cyberCodeFactoryCard_switchesToGlowingSuccessRingOnBuildCompletion() {
+        var progress by mutableFloatStateOf(0.50f)
+        var stepMessage by mutableStateOf("Compiling Kotlin sources…")
+        var isSuccess by mutableStateOf(false)
+
+        composeRule.setContent {
+            AiAppStudioTheme(darkTheme = true) {
+                CyberCodeFactoryCard(
+                    projectName = "Task Tracker",
+                    stepIndex = 1,
+                    totalSteps = 3,
+                    stepMessage = stepMessage,
+                    engineLabel = "Offline MediaPipe LLM",
+                    streamingCode = "package com.example.tasktracker\nclass MainActivity",
+                    buildPhase = BuildPhase.GENERATING_CODE,
+                    progress = progress,
+                    isSuccess = isSuccess,
+                    onCancel = {}
+                )
+            }
+        }
+
+        // Initially in building state: dual gears visible, success ring not shown, cancel button visible
+        composeRule.onNodeWithTag("factory_dual_gears").assertIsDisplayed()
+        composeRule.onNodeWithTag("factory_success_ring").assertDoesNotExist()
+        composeRule.onNodeWithTag("factory_milestone_badge").assertDoesNotExist()
+        composeRule.onNodeWithTag("cancel_generation_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("factory_progress_percent_text").assertTextEquals("50% Completed")
+
+        // Switch to successful build completion
+        composeRule.runOnIdle {
+            progress = 1.0f
+            stepMessage = "Build Complete: task-tracker-release.apk (2.4 MB)"
+            isSuccess = true
+        }
+        composeRule.mainClock.advanceTimeBy(500L)
+        composeRule.waitForIdle()
+
+        // Milestone reached: glowing green ring, success badge, 100% completed
+        composeRule.onNodeWithTag("factory_success_ring").assertIsDisplayed()
+        composeRule.onNodeWithTag("factory_milestone_badge").assertIsDisplayed()
+        composeRule.onNodeWithTag("cancel_generation_button").assertDoesNotExist()
+        composeRule.onNodeWithText("BUILD SUCCEEDED").assertIsDisplayed()
+        composeRule.onNodeWithTag("factory_progress_percent_text").assertTextEquals("100% Completed")
+        composeRule.onNodeWithTag("factory_node_compiling").assertContentDescriptionEquals("COMPILING completed")
+        composeRule.onNodeWithTag("factory_node_generating").assertContentDescriptionEquals("GENERATING completed")
+        composeRule.onNodeWithTag("factory_node_assembling").assertContentDescriptionEquals("ASSEMBLING completed")
+    }
 }

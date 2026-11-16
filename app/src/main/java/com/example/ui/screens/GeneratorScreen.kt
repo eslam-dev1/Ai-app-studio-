@@ -99,6 +99,7 @@ import com.example.data.generator.DeviceHardwareProfiler
 import com.example.data.generator.ModelLinkVerificationState
 import com.example.data.preferences.MonthlyUsageAlertState
 import com.example.model.AiEngineMode
+import com.example.model.BuildPhase
 import com.example.model.GenerationUiState
 import com.example.model.LocalModelDownloadState
 import com.example.model.OpenRouterModels
@@ -673,11 +674,24 @@ fun GeneratorScreen(
                         }
                     }
 
-                    // Active Animated Code Factory & Server Card during generation
-                    AnimatedVisibility(visible = generationState is GenerationUiState.Generating) {
-                        val active = generationState as? GenerationUiState.Generating
+                    // Active Animated Code Factory & Server Card during generation and success milestone
+                    AnimatedVisibility(
+                        visible = generationState is GenerationUiState.Generating || generationState is GenerationUiState.Success
+                    ) {
+                        val (active, isSuccess) = when (val state = generationState) {
+                            is GenerationUiState.Generating -> state to (state.progress >= 0.999f)
+                            is GenerationUiState.Success -> GenerationUiState.Generating(
+                                stepIndex = 3,
+                                stepMessage = "Build Complete: ${state.appName} Ready",
+                                engineLabel = "AI Code Factory",
+                                streamingPreview = "// Build Complete: ${state.appName} forged successfully.\n// Switching to Workspace…",
+                                buildPhase = BuildPhase.PACKAGING_APK,
+                                progress = 1.0f
+                            ) to true
+                            else -> null to false
+                        }
                         if (active != null) {
-                            val derivedProjectName = remember(promptText) {
+                            val derivedProjectName = remember(promptText, active.stepMessage) {
                                 promptText.trim()
                                     .split(Regex("\\s+"))
                                     .filter { it.isNotBlank() }
@@ -694,7 +708,8 @@ fun GeneratorScreen(
                                 streamingCode = active.streamingPreview,
                                 buildPhase = active.buildPhase,
                                 progress = active.progress,
-                                onCancel = onCancelGeneration
+                                isSuccess = isSuccess,
+                                onCancel = if (isSuccess) null else onCancelGeneration
                             )
                         }
                     }

@@ -90,6 +90,8 @@ object FactoryTelemetryCalculator {
         }
 
         return when {
+            lower.contains("complete") || lower.contains("success") || lower.contains("succeeded") ->
+                CloudBuildTelemetry(BuildPhase.PACKAGING_APK, 1.0f, msg)
             lower.contains("pre-build") || lower.contains("diagnostic") || lower.contains("authenticat") || lower.contains("preparing github") ->
                 CloudBuildTelemetry(BuildPhase.PROMPTING, 0.18f, msg)
             lower.contains("creating github") || lower.contains("keystore") ->
