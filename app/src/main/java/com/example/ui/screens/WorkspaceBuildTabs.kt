@@ -69,6 +69,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.github.GitHubBuildRepository
+import com.example.diagnostics.CloudBuildTelemetry
+import com.example.diagnostics.FactoryTelemetryCalculator
+import com.example.model.BuildPhase
 import com.example.model.GitRepoState
 import com.example.model.StudioProject
 import com.example.model.StudioSettings
@@ -229,26 +232,27 @@ fun WorkspaceBuildApkTab(
             )
         }
 
-        // 1. Live Animated Code Factory Card while building APK or testing animation preview
+        // 1. Live Animated Code Factory Card while building APK or previewing CI pipeline
         if (isCloudBuildBusy || showBuildAnimationPreview) {
             item {
-                val buildStepIdx = when {
-                    cloudBuildProgress?.contains("push", ignoreCase = true) == true -> 1
-                    cloudBuildProgress?.contains("trigger", ignoreCase = true) == true ||
-                        cloudBuildProgress?.contains("workflow", ignoreCase = true) == true -> 2
-                    else -> 0
+                val telemetry = if (isCloudBuildBusy) {
+                    FactoryTelemetryCalculator.resolveCloudApkBuildTelemetry(cloudBuildProgress)
+                } else {
+                    CloudBuildTelemetry(
+                        buildPhase = BuildPhase.PACKAGING_APK,
+                        progress = 0.85f,
+                        statusTicker = "Inspecting GitHub Actions APK workflow…"
+                    )
                 }
                 CyberCodeFactoryCard(
                     projectName = project.appName,
-                    stepIndex = if (showBuildAnimationPreview && !isCloudBuildBusy) 1 else buildStepIdx,
+                    stepIndex = telemetry.buildPhase.nodeIndex,
                     totalSteps = 3,
-                    stepMessage = if (showBuildAnimationPreview && !isCloudBuildBusy) {
-                        "Demonstrating Cybernetic Server Factory & Rotating Gears…"
-                    } else {
-                        cloudBuildProgress ?: "Compiling Debug APK via GitHub Actions…"
-                    },
+                    stepMessage = telemetry.statusTicker,
                     engineLabel = "GitHub Actions • Gradle 8",
                     streamingCode = workflowPreview,
+                    buildPhase = telemetry.buildPhase,
+                    progress = telemetry.progress,
                     onCancel = if (showBuildAnimationPreview && !isCloudBuildBusy) {
                         { showBuildAnimationPreview = false }
                     } else null

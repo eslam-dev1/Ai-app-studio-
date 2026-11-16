@@ -67,6 +67,7 @@ import com.example.data.generator.BundledModelState
 import com.example.data.generator.DeviceHardwareProfile
 import com.example.data.generator.DeviceHardwareProfiler
 import com.example.data.generator.LocalModelCatalog
+import com.example.data.generator.LocalModelSpecialty
 import com.example.data.generator.ModelLinkVerificationState
 import com.example.model.LocalModelDownloadState
 import com.example.model.StudioSettings
@@ -117,6 +118,10 @@ fun LocalAiModelManagerPanel(
 
     var selectedOptionId by rememberSaveable(recommendedPreset.id) {
         mutableStateOf(recommendedPreset.id)
+    }
+    var selectedSpecialty by rememberSaveable { mutableStateOf(LocalModelSpecialty.ALL) }
+    val suggestionsReport = remember(hardwareProfile, selectedSpecialty) {
+        LocalModelCatalog.buildSuggestionsForProfile(hardwareProfile, selectedSpecialty)
     }
     var customModelUrl by rememberSaveable { mutableStateOf("") }
     var hfTokenExpanded by rememberSaveable { mutableStateOf(false) }
@@ -185,7 +190,7 @@ fun LocalAiModelManagerPanel(
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
-                        text = "Local AI Model Catalog (${LocalModelCatalog.presets.size} Models)",
+                        text = "Local AI Model Catalog (${LocalModelCatalog.allPresets.size} Models)",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
@@ -310,6 +315,20 @@ fun LocalAiModelManagerPanel(
                 }
             }
 
+            // Smart Quick Picks & Specialty Filter Chips
+            LocalAiSuggestionsHeader(
+                suggestions = suggestionsReport,
+                selectedOptionId = selectedOptionId,
+                selectedSpecialty = selectedSpecialty,
+                isBusy = isBusy,
+                onSelectSpecialty = { selectedSpecialty = it },
+                onQuickPickModel = { picked ->
+                    onDismissDownloadError()
+                    selectedOptionId = picked.id
+                    onVerifySingleModelLink(picked.id, false)
+                }
+            )
+
             // Smart Tiered Model Selector Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -317,7 +336,7 @@ fun LocalAiModelManagerPanel(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Select On-Device Model (${LocalModelCatalog.presets.size} Models):",
+                    text = "Select On-Device Model (${suggestionsReport.filteredModels.size} Shown):",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
@@ -351,7 +370,7 @@ fun LocalAiModelManagerPanel(
                         .testTag("local_model_catalog_scroll_list"),
                     verticalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
-                    LocalModelCatalog.presets.forEach { preset ->
+                    suggestionsReport.filteredModels.forEach { preset ->
                         val isSelected = selectedOptionId == preset.id
                         val isRecommended = preset.id == recommendedPreset.id
                         val verificationState = modelVerificationStates[preset.id]
@@ -464,6 +483,15 @@ fun LocalAiModelManagerPanel(
                                             } else {
                                                 MaterialTheme.colorScheme.primary
                                             }
+                                        )
+                                    }
+                                    if (preset.bestForSummary.isNotBlank()) {
+                                        Text(
+                                            text = preset.bestForSummary,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                     Row(
@@ -639,6 +667,9 @@ fun LocalAiModelManagerPanel(
                     }
                 }
             }
+
+            // Collapsible Optimization Guide & Power-User Local AI Suggestions
+            LocalAiOptimizationTipsCard(suggestions = suggestionsReport)
 
             // Collapsible Hugging Face Token for Gated Google Gemma Models
             Surface(

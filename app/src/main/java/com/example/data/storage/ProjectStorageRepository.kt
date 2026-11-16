@@ -286,26 +286,43 @@ class ProjectStorageRepository(private val context: Context) {
         val client = OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS)
             .build()
 
-        val request = buildModelDownloadRequest(
-            url = cleanUrl,
-            huggingFaceToken = huggingFaceToken
-        )
+        val candidateUrls = if (cleanUrl.contains("huggingface.co")) {
+            listOf(cleanUrl, com.example.data.generator.SmartModelResolver.toMirrorUrl(cleanUrl))
+        } else {
+            listOf(cleanUrl)
+        }
+
+        var activeResponse: okhttp3.Response? = null
+        var lastDownloadException: Throwable? = null
+
+        for (candidateUrl in candidateUrls) {
+            try {
+                val request = buildModelDownloadRequest(
+                    url = candidateUrl,
+                    huggingFaceToken = huggingFaceToken
+                )
+                val resp = client.newCall(request).execute()
+                if (resp.isSuccessful) {
+                    activeResponse = resp
+                    break
+                } else {
+                    resp.close()
+                    lastDownloadException = IllegalStateException("HTTP ${resp.code} from $candidateUrl")
+                }
+            } catch (ioe: java.io.IOException) {
+                lastDownloadException = ioe
+            }
+        }
+
+        val response = activeResponse
+            ?: throw (lastDownloadException ?: IllegalStateException("Failed to connect to model servers."))
 
         try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    val msg = when (response.code) {
-                        401, 403 -> "HTTP ${response.code}: ${com.example.data.generator.HuggingFaceModelVerifier.GATED_LICENSE_ERROR_MESSAGE}"
-                        404 -> "Download failed with HTTP 404 (Model URL not found)"
-                        else -> "Download failed with HTTP ${response.code}"
-                    }
-                    throw IllegalStateException(msg)
-                }
-
+            response.use {
                 val body = response.body
                     ?: throw IllegalStateException("Empty response body from model server.")
                 val contentLength = body.contentLength().takeIf { it > 0L } ?: expectedSizeBytes

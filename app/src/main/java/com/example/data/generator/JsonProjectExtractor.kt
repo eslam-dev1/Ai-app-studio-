@@ -17,48 +17,7 @@ object JsonProjectExtractor {
     }
 
     fun extract(rawOutput: String): GeneratedProjectPayload {
-        val trimmed = rawOutput.trim()
-        val cleaned = stripMarkdownFences(trimmed)
-        val jsonSlice = extractOutermostJsonObject(cleaned)
-
-        val parsed: GeneratedProjectPayload = if (jsonSlice != null) {
-            runCatching {
-                lenientJson.decodeFromString<GeneratedProjectPayload>(jsonSlice)
-            }.getOrElse { ex ->
-                extractKotlinCodeFallback(trimmed) ?: throw IllegalStateException(
-                    "Could not parse generated project JSON: ${ex.localizedMessage ?: "Malformed JSON"}"
-                )
-            }
-        } else {
-            extractKotlinCodeFallback(trimmed) ?: throw IllegalStateException(
-                "The model did not return a valid JSON object or Kotlin source block. Please try again or switch models."
-            )
-        }
-
-        if (parsed.files.isEmpty()) {
-            throw IllegalStateException("Generated JSON contained zero project files.")
-        }
-
-        val normalizedPackage = sanitizePackageName(parsed.packageName)
-        val normalizedFiles = parsed.files.map { file ->
-            GeneratedFile(
-                path = file.path.trim().removePrefix("/"),
-                content = file.content
-            )
-        }.distinctBy { it.path }
-
-        val resolvedAppName = parsed.appName.ifBlank { "Generated App" }
-        val completeFiles = ensureEssentialGradleFiles(
-            appName = resolvedAppName,
-            packageName = normalizedPackage,
-            files = normalizedFiles
-        )
-
-        return parsed.copy(
-            appName = resolvedAppName,
-            packageName = normalizedPackage,
-            files = completeFiles
-        )
+        return AiCodeParser.parse(rawOutput)
     }
 
     private fun extractKotlinCodeFallback(rawText: String): GeneratedProjectPayload? {

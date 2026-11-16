@@ -3,6 +3,8 @@ package com.example.data.generator
 import com.example.data.remote.ChatCompletionRequest
 import com.example.data.remote.ChatMessage
 import com.example.data.remote.OpenAiChatApi
+import com.example.data.remote.OpenAiHttpStatusException
+import com.example.data.remote.OpenAiSseClient
 import com.example.model.StudioSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -27,20 +29,20 @@ class LocalServerGenerator : CodeGeneratorDataSource {
         isLenient = true
     }
 
-    private fun buildApiForUrl(rawBaseUrl: String): OpenAiChatApi {
-        val normalizedUrl = normalizeBaseUrl(rawBaseUrl)
+    private fun buildHttpClient(): OkHttpClient {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         }
-        // Extended 5-minute read/write timeout for local CPU / Termux inference
-        val client = OkHttpClient.Builder()
+        return OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.MINUTES)
             .writeTimeout(5, TimeUnit.MINUTES)
             .callTimeout(5, TimeUnit.MINUTES)
             .addInterceptor(logging)
             .build()
+    }
 
+    private fun buildApiForUrl(normalizedUrl: String, client: OkHttpClient): OpenAiChatApi {
         return Retrofit.Builder()
             .baseUrl(normalizedUrl)
             .client(client)
@@ -69,42 +71,74 @@ class LocalServerGenerator : CodeGeneratorDataSource {
         val modelName = settings.localServerModel.trim().ifBlank { "qwen2.5-coder:3b" }
 
         onProgress(0, "Connecting to local server…")
+        val client = buildHttpClient()
         val api = try {
-            buildApiForUrl(baseUrl)
+            buildApiForUrl(baseUrl, client)
         } catch (ex: IllegalArgumentException) {
             throw IllegalArgumentException("Invalid local server URL '$baseUrl': ${ex.localizedMessage}")
         }
 
-        onProgress(1, "Writing Kotlin & Compose code on $modelName…")
+        onProgress(1, "Streaming Kotlin & Compose code ($modelName)…")
+
+        val messages = listOf(
+            ChatMessage(role = "system", content = AppGenerationPrompt.SYSTEM_PROMPT),
+            ChatMessage(role = "user", content = AppGenerationPrompt.buildUserMessage(prompt))
+        )
 
         try {
-            val response = api.createChatCompletion(
-                authorization = null,
-                referer = null,
-                title = null,
-                request = ChatCompletionRequest(
+            val streamed = runCatching {
+                OpenAiSseClient.streamChatCompletion(
+                    client = client,
+                    endpointUrl = "${baseUrl}chat/completions",
                     model = modelName,
-                    messages = listOf(
-                        ChatMessage(role = "system", content = AppGenerationPrompt.SYSTEM_PROMPT),
-                        ChatMessage(role = "user", content = AppGenerationPrompt.buildUserMessage(prompt))
-                    ),
+                    messages = messages,
                     temperature = 0.2,
-                    maxTokens = 8192
+                    maxTokens = 8192,
+                    onTokenChunk = onStreamPreview
                 )
-            )
-
-            response.error?.message?.let { errMsg ->
-                throw IllegalStateException("Local server error: $errMsg")
+            }.getOrElse { sseErr ->
+                if (sseErr is CancellationException ||
+                    sseErr is ConnectException ||
+                    sseErr is UnknownHostException ||
+                    sseErr is SocketTimeoutException ||
+                    sseErr is OpenAiHttpStatusException
+                ) {
+                    throw sseErr
+                }
+                val response = api.createChatCompletion(
+                    authorization = null,
+                    referer = null,
+                    title = null,
+                    request = ChatCompletionRequest(
+                        model = modelName,
+                        messages = messages,
+                        temperature = 0.2,
+                        maxTokens = 8192
+                    )
+                )
+                response.error?.message?.let { errMsg ->
+                    throw IllegalStateException("Local server error: $errMsg")
+                }
+                val text = response.choices.firstOrNull()?.message?.content.orEmpty()
+                if (text.isNotBlank()) onStreamPreview(text)
+                com.example.data.remote.StreamCompletionOutput(
+                    content = text,
+                    modelUsed = response.model,
+                    tokensUsed = response.usage?.totalTokens?.takeIf { it > 0L }
+                )
             }
 
-            val rawContent = response.choices.firstOrNull()?.message?.content
-                ?: throw IllegalStateException("Local server returned an empty response.")
+            val rawContent = streamed.content
+            if (rawContent.isBlank()) {
+                throw IllegalStateException("Local server returned an empty response.")
+            }
 
-            onProgress(2, "Structuring Gradle files…")
+            onProgress(2, "Extracting files & structuring Gradle…")
             val payload = JsonProjectExtractor.extract(rawContent)
             GenerationResult(
                 payload = payload,
-                modelUsed = response.model ?: modelName
+                modelUsed = streamed.modelUsed ?: modelName,
+                tokensUsed = streamed.tokensUsed
             )
         } catch (ce: CancellationException) {
             throw ce
@@ -122,6 +156,11 @@ class LocalServerGenerator : CodeGeneratorDataSource {
             throw IllegalStateException(
                 "Local server timed out after 5 minutes while generating. Try a smaller quantized model (e.g., 1.5B–3B).",
                 ex
+            )
+        } catch (se: OpenAiHttpStatusException) {
+            throw IllegalStateException(
+                "Local server HTTP ${se.statusCode}: ${se.message}. Confirm model '$modelName' is pulled/loaded.",
+                se
             )
         } catch (he: HttpException) {
             val errBody = runCatching { he.response()?.errorBody()?.string() }.getOrNull()

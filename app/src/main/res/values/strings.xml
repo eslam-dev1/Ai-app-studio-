@@ -9,4 +9,8 @@
     <string name="saved_projects_title">Saved Projects</string>
     <string name="empty_projects_title">No generated projects yet</string>
     <string name="empty_projects_subtitle">Configure your OpenRouter API key above, describe an app idea, and tap Generate App to build a complete Kotlin &amp; Compose project.</string>
+    <string name="settings_vault_title">API Credentials Vault</string>
+    <string name="settings_vault_subtitle">OpenRouter &amp; Gemini Keys • Encrypted DataStore</string>
+    <string name="settings_usage_title">API Usage Statistics</string>
+    <string name="settings_usage_subtitle">Live telemetry parsed from validation response headers</string>
 </resources>

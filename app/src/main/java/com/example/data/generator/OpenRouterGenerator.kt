@@ -3,6 +3,8 @@ package com.example.data.generator
 import com.example.data.remote.ChatCompletionRequest
 import com.example.data.remote.ChatMessage
 import com.example.data.remote.OpenAiChatApi
+import com.example.data.remote.OpenAiHttpStatusException
+import com.example.data.remote.OpenAiSseClient
 import com.example.model.OpenRouterModels
 import com.example.model.StudioSettings
 import kotlinx.coroutines.CancellationException
@@ -76,69 +78,97 @@ class OpenRouterGenerator : CodeGeneratorDataSource {
             )
         }
 
-
         onProgress(0, "Designing architecture…")
         var lastError: Throwable? = null
 
-        // 1. If a Gemini model (or Auto Free) is selected and user has a direct Google Gemini API key,
-        // try Google's official Free Gemini endpoint with automatic model fallback on rate limits.
         val wantsGeminiFirst = OpenRouterModels.isGeminiModel(settings.openRouterModel) ||
             settings.openRouterModel == OpenRouterModels.AUTO_FREE ||
             effectiveOpenRouterKey.isBlank()
+
+        val systemAndUserMessages = listOf(
+            ChatMessage(role = "system", content = AppGenerationPrompt.SYSTEM_PROMPT),
+            ChatMessage(role = "user", content = AppGenerationPrompt.buildUserMessage(prompt))
+        )
 
         if (rawGeminiKey.isNotBlank() && wantsGeminiFirst) {
             for ((idx, geminiModel) in OpenRouterModels.directGeminiFallbackChain.withIndex()) {
                 try {
                     if (idx == 0) {
-                        onProgress(1, "Writing Kotlin & Compose code with Free Gemini ($geminiModel)…")
+                        onProgress(1, "Streaming Kotlin & Compose code ($geminiModel)…")
                     } else {
                         onProgress(1, "Limit reached — switching to $geminiModel…")
                     }
 
-                    val response = googleGeminiApi.createChatCompletion(
-                        authorization = "Bearer $rawGeminiKey",
-                        referer = null,
-                        title = null,
-                        request = ChatCompletionRequest(
+                    val streamed = runCatching {
+                        OpenAiSseClient.streamChatCompletion(
+                            client = httpClient,
+                            endpointUrl = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
                             model = geminiModel,
-                            messages = listOf(
-                                ChatMessage(role = "system", content = AppGenerationPrompt.SYSTEM_PROMPT),
-                                ChatMessage(role = "user", content = AppGenerationPrompt.buildUserMessage(prompt))
+                            messages = systemAndUserMessages,
+                            temperature = 0.25,
+                            maxTokens = 8192,
+                            authorization = "Bearer $rawGeminiKey",
+                            onTokenChunk = onStreamPreview
+                        )
+                    }.getOrElse { sseErr ->
+                        if (sseErr is CancellationException) throw sseErr
+                        if (sseErr is OpenAiHttpStatusException && sseErr.statusCode in setOf(401, 403, 429)) {
+                            throw sseErr
+                        }
+                        val fallbackResp = googleGeminiApi.createChatCompletion(
+                            authorization = "Bearer $rawGeminiKey",
+                            referer = null,
+                            title = null,
+                            request = ChatCompletionRequest(
+                                model = geminiModel,
+                                messages = systemAndUserMessages
                             )
                         )
-                    )
+                        val text = fallbackResp.choices.firstOrNull()?.message?.content.orEmpty()
+                        if (text.isNotBlank()) onStreamPreview(text)
+                        com.example.data.remote.StreamCompletionOutput(
+                            content = text,
+                            modelUsed = fallbackResp.model,
+                            tokensUsed = fallbackResp.usage?.totalTokens?.takeIf { it > 0L }
+                        )
+                    }
 
-                    val rawContent = response.choices.firstOrNull()?.message?.content
-                        ?: throw IllegalStateException("Gemini returned an empty response for $geminiModel.")
+                    val rawContent = streamed.content
+                    if (rawContent.isBlank()) {
+                        throw IllegalStateException("Gemini returned an empty response for $geminiModel.")
+                    }
 
-                    onProgress(2, "Structuring Gradle files…")
+                    onProgress(2, "Extracting files & structuring Gradle…")
                     val payload = JsonProjectExtractor.extract(rawContent)
                     return@withContext GenerationResult(
                         payload = payload,
-                        modelUsed = "Gemini Free ($geminiModel)"
+                        modelUsed = "Gemini Free ($geminiModel)",
+                        tokensUsed = streamed.tokensUsed
                     )
                 } catch (ce: CancellationException) {
                     throw ce
+                } catch (se: OpenAiHttpStatusException) {
+                    if (se.statusCode == 401 || se.statusCode == 403) {
+                        lastError = IllegalStateException("Invalid Google Gemini API key (${se.statusCode}).", se)
+                        break
+                    }
+                    lastError = se
                 } catch (he: HttpException) {
                     if (he.code() == 401 || he.code() == 403) {
                         lastError = IllegalStateException("Invalid Google Gemini API key (${he.code()}).", he)
                         break
                     }
                     lastError = he
-                    // Continue to next valid Gemini model in fallback chain on 429 / 503
                 } catch (ex: Exception) {
                     lastError = ex
                 }
             }
         }
 
-        // 2. Use OpenRouter with automatic model fallback across all valid free models whenever
-        // a model's rate limit/quota is finished.
         if (effectiveOpenRouterKey.isNotBlank()) {
             val orderedModels = if (settings.openRouterModel == OpenRouterModels.AUTO_FREE) {
                 OpenRouterModels.fallbackChain
             } else {
-                // Start with the user's selected model, then automatically fall back to the remaining free models if rate-limited
                 listOf(settings.openRouterModel) +
                     OpenRouterModels.fallbackChain.filterNot { it == settings.openRouterModel }
             }
@@ -149,37 +179,71 @@ class OpenRouterGenerator : CodeGeneratorDataSource {
                     if (idx > 0) {
                         onProgress(1, "Limit reached — switching to $label…")
                     } else {
-                        onProgress(1, "Writing Kotlin & Compose code ($label)…")
+                        onProgress(1, "Streaming Kotlin & Compose code ($label)…")
                     }
 
-                    val response = openRouterApi.createChatCompletion(
-                        authorization = "Bearer $effectiveOpenRouterKey",
-                        referer = "https://aiappstudio.local",
-                        title = "AI App Studio",
-                        request = ChatCompletionRequest(
+                    val streamed = runCatching {
+                        OpenAiSseClient.streamChatCompletion(
+                            client = httpClient,
+                            endpointUrl = "https://openrouter.ai/api/v1/chat/completions",
                             model = modelId,
-                            messages = listOf(
-                                ChatMessage(role = "system", content = AppGenerationPrompt.SYSTEM_PROMPT),
-                                ChatMessage(role = "user", content = AppGenerationPrompt.buildUserMessage(prompt))
+                            messages = systemAndUserMessages,
+                            temperature = 0.25,
+                            maxTokens = 8192,
+                            authorization = "Bearer $effectiveOpenRouterKey",
+                            referer = "https://aiappstudio.local",
+                            title = "AI App Studio",
+                            onTokenChunk = onStreamPreview
+                        )
+                    }.getOrElse { sseErr ->
+                        if (sseErr is CancellationException) throw sseErr
+                        if (sseErr is OpenAiHttpStatusException && sseErr.statusCode in setOf(401, 402, 429)) {
+                            throw sseErr
+                        }
+                        val fallbackResp = openRouterApi.createChatCompletion(
+                            authorization = "Bearer $effectiveOpenRouterKey",
+                            referer = "https://aiappstudio.local",
+                            title = "AI App Studio",
+                            request = ChatCompletionRequest(
+                                model = modelId,
+                                messages = systemAndUserMessages
                             )
                         )
-                    )
-
-                    response.error?.message?.let { errMsg ->
-                        throw IllegalStateException("OpenRouter error ($modelId): $errMsg")
+                        fallbackResp.error?.message?.let { errMsg ->
+                            throw IllegalStateException("OpenRouter error ($modelId): $errMsg")
+                        }
+                        val text = fallbackResp.choices.firstOrNull()?.message?.content.orEmpty()
+                        if (text.isNotBlank()) onStreamPreview(text)
+                        com.example.data.remote.StreamCompletionOutput(
+                            content = text,
+                            modelUsed = fallbackResp.model,
+                            tokensUsed = fallbackResp.usage?.totalTokens?.takeIf { it > 0L }
+                        )
                     }
 
-                    val rawContent = response.choices.firstOrNull()?.message?.content
-                        ?: throw IllegalStateException("OpenRouter returned an empty response for $modelId.")
+                    val rawContent = streamed.content
+                    if (rawContent.isBlank()) {
+                        throw IllegalStateException("OpenRouter returned an empty response for $modelId.")
+                    }
 
-                    onProgress(2, "Structuring Gradle files…")
+                    onProgress(2, "Extracting files & structuring Gradle…")
                     val payload = JsonProjectExtractor.extract(rawContent)
                     return@withContext GenerationResult(
                         payload = payload,
-                        modelUsed = response.model ?: modelId
+                        modelUsed = streamed.modelUsed ?: modelId,
+                        tokensUsed = streamed.tokensUsed
                     )
                 } catch (ce: CancellationException) {
                     throw ce
+                } catch (se: OpenAiHttpStatusException) {
+                    val msg = when (se.statusCode) {
+                        401 -> "Invalid OpenRouter API key (401 Unauthorized)."
+                        402 -> "Insufficient OpenRouter credits (402)."
+                        429 -> "Rate limit reached on $modelId (429)."
+                        else -> "OpenRouter HTTP ${se.statusCode}: ${se.message}"
+                    }
+                    lastError = IllegalStateException(msg, se)
+                    if (se.statusCode == 401) throw lastError
                 } catch (he: HttpException) {
                     val errorBody = runCatching { he.response()?.errorBody()?.string() }.getOrNull()
                     val msg = when (he.code()) {

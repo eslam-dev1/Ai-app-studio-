@@ -1045,6 +1045,596 @@ class StudioCoreUnitTest {
         assertTrue(metrics.declaredPermissions.contains("INTERNET"))
         assertTrue(metrics.estimatedApkSizeMb > 3.0)
     }
+
+    @Test
+    fun apiCredentialValidator_detectsKeyFormatsAndCrossProviderMistakes() {
+        val validGemini = com.example.data.preferences.ApiCredentialValidator.validateGeminiKeyFormat(
+            "AIzaSyDemoKeyValue1234567890abcdefg"
+        )
+        assertTrue(validGemini.isValidShape)
+        assertEquals(null, validGemini.warningMessage)
+        assertTrue(validGemini.helperHint!!.contains("Valid Gemini key format"))
+
+        val shortGemini = com.example.data.preferences.ApiCredentialValidator.validateGeminiKeyFormat("AIzaShort123")
+        assertFalse(shortGemini.isValidShape)
+        assertTrue(shortGemini.warningMessage!!.contains("Too short"))
+
+        val spaceGemini = com.example.data.preferences.ApiCredentialValidator.validateGeminiKeyFormat(
+            "AIzaSyDemoKeyValue 1234567890abcdefg"
+        )
+        assertFalse(spaceGemini.isValidShape)
+        assertTrue(spaceGemini.warningMessage!!.contains("spaces"))
+
+        val badCharGemini = com.example.data.preferences.ApiCredentialValidator.validateGeminiKeyFormat(
+            "AIzaSyDemoKeyValue\$1234567890abcdefg"
+        )
+        assertFalse(badCharGemini.isValidShape)
+        assertTrue(badCharGemini.warningMessage!!.contains("Invalid character"))
+
+        val misplacedOpenRouter = com.example.data.preferences.ApiCredentialValidator.validateGeminiKeyFormat(
+            "sk-or-v1-1234567890abcdef1234567890"
+        )
+        assertFalse(misplacedOpenRouter.isValidShape)
+        assertTrue(misplacedOpenRouter.warningMessage!!.contains("OpenRouter"))
+
+        val validOpenRouter = com.example.data.preferences.ApiCredentialValidator.validateOpenRouterKeyFormat(
+            "sk-or-v1-1234567890abcdef1234567890"
+        )
+        assertTrue(validOpenRouter.isValidShape)
+        assertEquals(null, validOpenRouter.warningMessage)
+        assertTrue(validOpenRouter.helperHint!!.contains("Valid OpenRouter key format"))
+
+        val shortOpenRouter = com.example.data.preferences.ApiCredentialValidator.validateOpenRouterKeyFormat(
+            "sk-or-v1-short"
+        )
+        assertFalse(shortOpenRouter.isValidShape)
+        assertTrue(shortOpenRouter.warningMessage!!.contains("Too short"))
+
+        val badCharOpenRouter = com.example.data.preferences.ApiCredentialValidator.validateOpenRouterKeyFormat(
+            "sk-or-v1-1234567890!abcdef12345678"
+        )
+        assertFalse(badCharOpenRouter.isValidShape)
+        assertTrue(badCharOpenRouter.warningMessage!!.contains("Invalid character"))
+
+        val misplacedGemini = com.example.data.preferences.ApiCredentialValidator.validateOpenRouterKeyFormat(
+            "AIzaSyDemoKeyValue1234567890abcdefg"
+        )
+        assertFalse(misplacedGemini.isValidShape)
+        assertTrue(misplacedGemini.warningMessage!!.contains("Gemini"))
+
+        assertEquals(
+            "AIzaSy••••••defg",
+            com.example.data.preferences.SecureCredentialCipher.maskSecret("AIzaSyDemoKey123456defg")
+        )
+        assertEquals(
+            "sk-or-v1-••••••7890",
+            com.example.data.preferences.SecureCredentialCipher.maskSecret("sk-or-v1-abcdef1234567890")
+        )
+    }
+
+    @Test
+    fun apiCredentialValidator_verifySavedProviderHealth_handlesConfiguredAndErrorStates() = runBlocking {
+        val emptySettings = com.example.model.StudioSettings(
+            geminiApiKey = "",
+            openRouterApiKey = ""
+        )
+        val (noneResolved, noneState) = com.example.data.preferences.ApiCredentialValidator.verifySavedProviderHealth(
+            settings = emptySettings,
+            buildConfigGeminiKey = ""
+        )
+        assertEquals(null, noneResolved)
+        assertTrue(noneState is com.example.data.preferences.SavedApiKeyHealthState.NotConfigured)
+
+        // Gemini lightweight health check (200 OK with models payload)
+        val mockGeminiClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                assertTrue(req.url.toString().contains("generativelanguage.googleapis.com/v1beta/models"))
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(
+                        okhttp3.ResponseBody.create(
+                            null,
+                            """{"models":[{"name":"models/gemini-2.5-flash","displayName":"Gemini 2.5 Flash"}]}"""
+                        )
+                    )
+                    .build()
+            }
+            .build()
+
+        val geminiSettings = com.example.model.StudioSettings(
+            geminiApiKey = "AIzaSyTestSavedGeminiKey1234567890ab",
+            openRouterModel = com.example.model.OpenRouterModels.GEMINI_25_PRO_FREE
+        )
+        val (gemResolved, gemHealth) = com.example.data.preferences.ApiCredentialValidator.verifySavedProviderHealth(
+            settings = geminiSettings,
+            buildConfigGeminiKey = "",
+            httpClient = mockGeminiClient
+        )
+        assertEquals(com.example.data.preferences.ConfiguredCloudProvider.GEMINI, gemResolved?.provider)
+        assertTrue(gemHealth is com.example.data.preferences.SavedApiKeyHealthState.Verified)
+        val verifiedGem = gemHealth as com.example.data.preferences.SavedApiKeyHealthState.Verified
+        assertEquals("Google Gemini", verifiedGem.providerLabel)
+        assertTrue(verifiedGem.detail.contains("Gemini 2.5 Flash"))
+        assertTrue(verifiedGem.latencyMs >= 1L)
+
+        // OpenRouter lightweight health check (200 OK with auth/key payload)
+        val mockOpenRouterClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                assertEquals("https://openrouter.ai/api/v1/auth/key", req.url.toString())
+                assertTrue(req.header("Authorization")!!.startsWith("Bearer sk-or-v1-"))
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(
+                        okhttp3.ResponseBody.create(
+                            null,
+                            """{"data":{"label":"Studio Key","is_free_tier":true}}"""
+                        )
+                    )
+                    .build()
+            }
+            .build()
+
+        val openRouterSettings = com.example.model.StudioSettings(
+            openRouterApiKey = "sk-or-v1-testsavedopenrouterkey1234567890",
+            openRouterModel = com.example.model.OpenRouterModels.QWEN_CODER_FREE
+        )
+        val (orResolved, orHealth) = com.example.data.preferences.ApiCredentialValidator.verifySavedProviderHealth(
+            settings = openRouterSettings,
+            buildConfigGeminiKey = "",
+            httpClient = mockOpenRouterClient
+        )
+        assertEquals(com.example.data.preferences.ConfiguredCloudProvider.OPENROUTER, orResolved?.provider)
+        assertTrue(orHealth is com.example.data.preferences.SavedApiKeyHealthState.Verified)
+        val verifiedOr = orHealth as com.example.data.preferences.SavedApiKeyHealthState.Verified
+        assertEquals("OpenRouter", verifiedOr.providerLabel)
+        assertTrue(verifiedOr.detail.contains("Studio Key (Free tier)"))
+
+        // Unauthorized 401 -> SavedApiKeyHealthState.Error
+        val failingClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(401)
+                    .message("Unauthorized")
+                    .body(okhttp3.ResponseBody.create(null, """{"error":"invalid_key"}"""))
+                    .build()
+            }
+            .build()
+        val (_, failedHealth) = com.example.data.preferences.ApiCredentialValidator.verifySavedProviderHealth(
+            settings = openRouterSettings,
+            buildConfigGeminiKey = "",
+            httpClient = failingClient
+        )
+        assertTrue(failedHealth is com.example.data.preferences.SavedApiKeyHealthState.Error)
+        assertTrue((failedHealth as com.example.data.preferences.SavedApiKeyHealthState.Error).message.contains("401"))
+    }
+
+    @Test
+    fun apiUsageHeaderParser_parsesAndAccumulatesValidationResponseHeaders() = runBlocking {
+        // 1. Mock validation response with both request quota headers and token usage headers
+        val telemetryClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("X-RateLimit-Limit-Requests", "200")
+                    .header("X-RateLimit-Remaining-Requests", "194")
+                    .header("X-RateLimit-Reset-Requests", "45s")
+                    .header("X-Usage-Total-Tokens", "125")
+                    .header("X-RateLimit-Limit-Tokens", "10000")
+                    .header("X-RateLimit-Remaining-Tokens", "9875")
+                    .header("X-Request-Id", "req_abc123")
+                    .body(
+                        okhttp3.ResponseBody.create(
+                            null,
+                            """{"data":{"label":"Pro Key","is_free_tier":false}}"""
+                        )
+                    )
+                    .build()
+            }
+            .build()
+
+        val settings = com.example.model.StudioSettings(
+            openRouterApiKey = "sk-or-v1-headertelemetrykey1234567890",
+            openRouterModel = com.example.model.OpenRouterModels.QWEN_CODER_FREE
+        )
+        val (_, health) = com.example.data.preferences.ApiCredentialValidator.verifySavedProviderHealth(
+            settings = settings,
+            buildConfigGeminiKey = "",
+            httpClient = telemetryClient
+        )
+
+        assertTrue(health is com.example.data.preferences.SavedApiKeyHealthState.Verified)
+        val verified = health as com.example.data.preferences.SavedApiKeyHealthState.Verified
+        assertEquals(200, verified.httpStatusCode)
+        val headers = verified.usageHeaders
+        assertNotNull(headers)
+        assertEquals(200L, headers!!.requestsLimit)
+        assertEquals(194L, headers.requestsRemaining)
+        assertEquals(6L, headers.computedHeaderRequestsUsed)
+        assertEquals("45s", headers.requestsReset)
+        assertEquals(125L, headers.tokensUsedFromHeader)
+        assertEquals(10000L, headers.tokensLimit)
+        assertEquals(9875L, headers.tokensRemaining)
+        assertEquals("req_abc123", headers.rawDetectedHeaders["x-request-id"])
+
+        // 2. Accumulate across multiple validation calls into ApiUsageSummary
+        val initialSummary = com.example.data.preferences.ApiUsageSummary()
+        val afterFirst = com.example.data.preferences.ApiUsageHeaderParser.applyValidationResponse(
+            current = initialSummary,
+            providerName = "OpenRouter",
+            httpStatusCode = verified.httpStatusCode,
+            latencyMs = verified.latencyMs,
+            parsed = headers
+        )
+        assertEquals(1, afterFirst.validationRequestsMade)
+        assertEquals(1, afterFirst.successfulValidations)
+        assertEquals(0, afterFirst.failedValidations)
+        assertEquals(125L, afterFirst.totalTokensUsed)
+        assertEquals(125L, afterFirst.lastCallTokensUsed)
+        assertEquals(200L, afterFirst.requestsLimit)
+        assertEquals(194L, afterFirst.requestsRemaining)
+        assertEquals(6L, afterFirst.headerReportedRequestsUsed)
+
+        // Second validation call with prompt + completion token headers and 401 failure
+        val secondRawHeaders = okhttp3.Headers.headersOf(
+            "x-ratelimit-limit", "200",
+            "x-ratelimit-remaining", "193",
+            "x-usage-prompt-tokens", "30",
+            "x-usage-completion-tokens", "20"
+        )
+        val parsedSecond = com.example.data.preferences.ApiUsageHeaderParser.parse(secondRawHeaders)
+        val afterSecond = com.example.data.preferences.ApiUsageHeaderParser.applyValidationResponse(
+            current = afterFirst,
+            providerName = "OpenRouter",
+            httpStatusCode = 401,
+            latencyMs = 42L,
+            parsed = parsedSecond
+        )
+        assertEquals(2, afterSecond.validationRequestsMade)
+        assertEquals(1, afterSecond.successfulValidations)
+        assertEquals(1, afterSecond.failedValidations)
+        assertEquals(175L, afterSecond.totalTokensUsed) // 125 + (30 + 20)
+        assertEquals(50L, afterSecond.lastCallTokensUsed)
+        assertEquals(193L, afterSecond.requestsRemaining)
+    }
+
+    @Test
+    fun apiUsageThresholdEvaluator_detectsApproachingReachedDisabledAndMonthRollover() {
+        val currentMonth = "2026-11"
+        val baseSettings = com.example.model.StudioSettings(
+            monthlyUsageAlertEnabled = true,
+            monthlyUsageLimitMetric = com.example.model.ApiUsageLimitMetric.REQUESTS,
+            monthlyUsageLimit = 10L,
+            monthlyUsageWarningThresholdPercent = 80
+        )
+
+        // Below 80% threshold (7 / 10 = 70%) -> NONE
+        val belowSummary = com.example.data.preferences.ApiUsageSummary(
+            trackingYearMonth = currentMonth,
+            monthlyRequestsMade = 7,
+            monthlyTokensUsed = 7000L
+        )
+        val belowState = com.example.data.preferences.ApiUsageThresholdEvaluator.evaluate(
+            summary = belowSummary,
+            settings = baseSettings,
+            currentYearMonth = currentMonth
+        )
+        assertEquals(com.example.data.preferences.UsageThresholdSeverity.NONE, belowState.severity)
+        assertFalse(belowState.shouldShowWarning)
+        assertEquals(70, belowState.usagePercent)
+
+        // At 80% threshold (8 / 10 = 80%) -> APPROACHING
+        val approachingSummary = belowSummary.copy(monthlyRequestsMade = 8)
+        val approachingState = com.example.data.preferences.ApiUsageThresholdEvaluator.evaluate(
+            summary = approachingSummary,
+            settings = baseSettings,
+            currentYearMonth = currentMonth
+        )
+        assertEquals(com.example.data.preferences.UsageThresholdSeverity.APPROACHING, approachingState.severity)
+        assertTrue(approachingState.shouldShowWarning)
+        assertEquals(80, approachingState.usagePercent)
+
+        // At or above 100% limit (10 / 10) -> LIMIT_REACHED
+        val reachedSummary = belowSummary.copy(monthlyRequestsMade = 10)
+        val reachedState = com.example.data.preferences.ApiUsageThresholdEvaluator.evaluate(
+            summary = reachedSummary,
+            settings = baseSettings,
+            currentYearMonth = currentMonth
+        )
+        assertEquals(com.example.data.preferences.UsageThresholdSeverity.LIMIT_REACHED, reachedState.severity)
+        assertTrue(reachedState.shouldShowWarning)
+        assertEquals(100, reachedState.usagePercent)
+
+        // Token metric evaluation (9,000 / 10,000 = 90% >= 80%) -> APPROACHING
+        val tokenSettings = baseSettings.copy(
+            monthlyUsageLimitMetric = com.example.model.ApiUsageLimitMetric.TOKENS,
+            monthlyUsageLimit = 10_000L
+        )
+        val tokenState = com.example.data.preferences.ApiUsageThresholdEvaluator.evaluate(
+            summary = belowSummary.copy(monthlyTokensUsed = 9_000L),
+            settings = tokenSettings,
+            currentYearMonth = currentMonth
+        )
+        assertEquals(com.example.data.preferences.UsageThresholdSeverity.APPROACHING, tokenState.severity)
+        assertEquals(90, tokenState.usagePercent)
+
+        // Alerts disabled -> NONE even when at limit
+        val disabledState = com.example.data.preferences.ApiUsageThresholdEvaluator.evaluate(
+            summary = reachedSummary,
+            settings = baseSettings.copy(monthlyUsageAlertEnabled = false),
+            currentYearMonth = currentMonth
+        )
+        assertEquals(com.example.data.preferences.UsageThresholdSeverity.NONE, disabledState.severity)
+        assertFalse(disabledState.shouldShowWarning)
+
+        // Calendar month rollover: usage tracked in 2026-10 evaluates as 0 in 2026-11
+        val rolloverEval = com.example.data.preferences.ApiUsageThresholdEvaluator.evaluate(
+            summary = reachedSummary.copy(trackingYearMonth = "2026-10"),
+            settings = baseSettings,
+            currentYearMonth = "2026-11"
+        )
+        assertEquals(0L, rolloverEval.currentUsage)
+        assertEquals(com.example.data.preferences.UsageThresholdSeverity.NONE, rolloverEval.severity)
+
+        // Applying generation usage in a new calendar month resets monthly counters while keeping lifetime totals
+        val novEpochMs = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+            .parse("2026-11-02")!!.time
+        val rolledSummary = com.example.data.preferences.ApiUsageHeaderParser.applyGenerationUsage(
+            current = reachedSummary.copy(
+                trackingYearMonth = "2026-10",
+                validationRequestsMade = 10,
+                totalTokensUsed = 25_000L,
+                monthlyRequestsMade = 10,
+                monthlyTokensUsed = 25_000L
+            ),
+            providerName = "OpenRouter",
+            tokensUsed = 350L,
+            latencyMs = 120L,
+            nowEpochMs = novEpochMs
+        )
+        assertEquals("2026-11", rolledSummary.trackingYearMonth)
+        assertEquals(1, rolledSummary.monthlyRequestsMade)
+        assertEquals(350L, rolledSummary.monthlyTokensUsed)
+        assertEquals(11, rolledSummary.validationRequestsMade)
+        assertEquals(25_350L, rolledSummary.totalTokensUsed)
+    }
+
+    @Test
+    fun localModelCatalog_extendedSuggestionsAndSpecialtyFilteringWorkAcrossRamTiers() {
+        assertEquals(10, com.example.data.generator.LocalModelCatalog.presets.size)
+        assertEquals(8, com.example.data.generator.LocalModelCatalog.extendedSuggestions.size)
+        val all = com.example.data.generator.LocalModelCatalog.allPresets
+        assertEquals(18, all.size)
+        assertEquals(18, all.map { it.id }.distinct().size)
+        assertNotNull(com.example.data.generator.LocalModelCatalog.findById("qwen25_coder_15b"))
+        assertNotNull(com.example.data.generator.LocalModelCatalog.findById("hammer21_15b"))
+
+        val lowRamProfile = com.example.data.generator.DeviceHardwareProfiler.buildProfile(
+            totalRamGb = 4.0,
+            availableRamGb = 1.6
+        )
+        val lowRamBestFit = com.example.data.generator.LocalModelCatalog.buildSuggestionsForProfile(
+            profile = lowRamProfile,
+            specialty = com.example.data.generator.LocalModelSpecialty.BEST_FIT
+        )
+        assertTrue(lowRamBestFit.filteredModels.isNotEmpty())
+        assertTrue(
+            lowRamBestFit.filteredModels.all {
+                it.tier == com.example.data.generator.LocalModelTier.TIER_1_LITE
+            }
+        )
+        assertEquals("model3_micro_coder", lowRamBestFit.codingPick.id)
+        assertEquals(4, lowRamBestFit.tips.size)
+
+        val flagshipProfile = com.example.data.generator.DeviceHardwareProfiler.buildProfile(
+            totalRamGb = 12.0,
+            availableRamGb = 6.5
+        )
+        val flagshipCoding = com.example.data.generator.LocalModelCatalog.buildSuggestionsForProfile(
+            profile = flagshipProfile,
+            specialty = com.example.data.generator.LocalModelSpecialty.CODING
+        )
+        assertEquals("qwen25_coder_3b", flagshipCoding.codingPick.id)
+        assertTrue(flagshipCoding.filteredModels.any { it.id == "qwen25_coder_15b" })
+        assertTrue(flagshipCoding.filteredModels.any { it.id == "qwen25_coder_3b" })
+
+        val toolCalling = com.example.data.generator.LocalModelCatalog.buildSuggestionsForProfile(
+            profile = flagshipProfile,
+            specialty = com.example.data.generator.LocalModelSpecialty.TOOL_CALLING
+        )
+        assertEquals(listOf("hammer21_15b"), toolCalling.filteredModels.map { it.id })
+    }
+
+    @Test
+    fun factoryTelemetryCalculator_computesRealProgressExtractsFilenamesAndSanitizesLoops() {
+        assertEquals(
+            0,
+            com.example.diagnostics.FactoryTelemetryCalculator.activeNodeForPhase(com.example.model.BuildPhase.PROMPTING)
+        )
+        assertEquals(
+            1,
+            com.example.diagnostics.FactoryTelemetryCalculator.activeNodeForPhase(com.example.model.BuildPhase.GENERATING_CODE)
+        )
+        assertEquals(
+            2,
+            com.example.diagnostics.FactoryTelemetryCalculator.activeNodeForPhase(com.example.model.BuildPhase.PARSING_FILES)
+        )
+        assertEquals(
+            2,
+            com.example.diagnostics.FactoryTelemetryCalculator.activeNodeForPhase(com.example.model.BuildPhase.PACKAGING_APK)
+        )
+
+        val streamStart = com.example.diagnostics.FactoryTelemetryCalculator.calculateStreamProgress(charsReceived = 0)
+        val streamMid = com.example.diagnostics.FactoryTelemetryCalculator.calculateStreamProgress(charsReceived = 3600)
+        val streamHigh = com.example.diagnostics.FactoryTelemetryCalculator.calculateStreamProgress(charsReceived = 7200)
+        assertEquals(0.16f, streamStart, 0.001f)
+        assertEquals(0.50f, streamMid, 0.01f)
+        assertEquals(0.84f, streamHigh, 0.001f)
+
+        val fileHalf = com.example.diagnostics.FactoryTelemetryCalculator.calculateFileWriteProgress(
+            writtenFiles = 3,
+            totalFiles = 6
+        )
+        assertEquals(0.915f, fileHalf, 0.01f)
+
+        val downloadQuarter = com.example.diagnostics.FactoryTelemetryCalculator.calculateDownloadProgress(
+            bytesRead = 250L * 1024L * 1024L,
+            totalBytes = 1000L * 1024L * 1024L
+        )
+        assertEquals(0.25f, downloadQuarter, 0.001f)
+
+        val extractedJsonFile = com.example.diagnostics.FactoryTelemetryCalculator.extractActiveFileLabel(
+            """{"appName":"Demo","files":[{"path":"app/src/main/java/com/example/ui/Theme.kt","content":"..."}]}"""
+        )
+        assertEquals("Theme.kt", extractedJsonFile)
+
+        val extractedCommentFile = com.example.diagnostics.FactoryTelemetryCalculator.extractActiveFileLabel(
+            "// MainActivity.kt\n@Composable fun Home() {}"
+        )
+        assertEquals("MainActivity.kt", extractedCommentFile)
+
+        val loopText = "implementation(compose-compose-compose-compose-compose-compose)"
+        val sanitized = com.example.diagnostics.FactoryTelemetryCalculator.sanitizeStreamingCode(loopText)
+        assertFalse(sanitized.contains("compose-compose-compose-compose"))
+        assertTrue(sanitized.contains("compose…"))
+
+        val cloudUploading = com.example.diagnostics.FactoryTelemetryCalculator.resolveCloudApkBuildTelemetry(
+            "Uploading (3/6): app/src/main/java/com/example/MainActivity.kt"
+        )
+        assertEquals(com.example.model.BuildPhase.GENERATING_CODE, cloudUploading.buildPhase)
+        assertEquals(0.525f, cloudUploading.progress, 0.01f)
+        assertTrue(cloudUploading.statusTicker.contains("Uploading (3/6)"))
+    }
+
+    @Test
+    fun openAiSseClient_streamsIncrementalDeltaTokensAndUsage() = runBlocking {
+        val ssePayload = listOf(
+            """data: {"model":"google/gemini-2.5-pro-exp-03-25","choices":[{"delta":{"content":"package com.demo\n"}}]}""",
+            """data: {"choices":[{"delta":{"content":"@Composable fun LiveApp() { Text(\"Real SSE\") }"}}]}""",
+            """data: {"usage":{"prompt_tokens":12,"completion_tokens":28,"total_tokens":40},"choices":[{"delta":{}}]}""",
+            """data: [DONE]"""
+        ).joinToString("\n\n")
+
+        val mockClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "text/event-stream")
+                    .body(okhttp3.ResponseBody.create(null, ssePayload.toByteArray()))
+                    .build()
+            }
+            .build()
+
+        val emittedChunks = mutableListOf<String>()
+        val result = com.example.data.remote.OpenAiSseClient.streamChatCompletion(
+            client = mockClient,
+            endpointUrl = "https://openrouter.ai/api/v1/chat/completions",
+            model = "google/gemini-2.5-pro-exp-03-25",
+            messages = listOf(com.example.data.remote.ChatMessage(role = "user", content = "Build counter")),
+            temperature = 0.2,
+            maxTokens = 2048,
+            authorization = "Bearer test-key"
+        ) { chunk ->
+            emittedChunks += chunk
+        }
+
+        assertTrue(emittedChunks.isNotEmpty())
+        assertTrue(result.content.contains("@Composable fun LiveApp()"))
+        assertEquals("google/gemini-2.5-pro-exp-03-25", result.modelUsed)
+        assertEquals(40L, result.tokensUsed)
+    }
+
+    @Test
+    fun aiCodeParser_parsesJsonFencedCodeHeuristicsAndGracefulFallback() {
+        // Stage 1: JSON Object parsing
+        val rawJson = """
+            {
+              "appName": "Test App",
+              "packageName": "com.test.app",
+              "files": [
+                { "path": "MainActivity.kt", "content": "package com.test.app\nclass MainActivity" }
+              ]
+            }
+        """.trimIndent()
+        val parsedJson = com.example.data.generator.AiCodeParser.parse(rawJson)
+        assertEquals("Test App", parsedJson.appName)
+        assertEquals("com.test.app", parsedJson.packageName)
+        assertTrue(parsedJson.files.any { it.path.endsWith("MainActivity.kt") })
+
+        // Stage 2: Markdown Code Fences
+        val rawFenced = """
+            Here is the implementation:
+            ```kotlin
+            package com.fenced.app
+            @Composable fun FencedScreen() { Text("Fenced") }
+            ```
+        """.trimIndent()
+        val parsedFenced = com.example.data.generator.AiCodeParser.parse(rawFenced)
+        assertTrue(parsedFenced.files.any { it.content.contains("FencedScreen") })
+
+        // Stage 3: Raw Kotlin Heuristic
+        val rawHeuristic = """
+            @Composable
+            fun RawScreen() {
+                Button(onClick = {}) { Text("Raw") }
+            }
+        """.trimIndent()
+        val parsedHeuristic = com.example.data.generator.AiCodeParser.parse(rawHeuristic)
+        assertTrue(parsedHeuristic.files.any { it.content.contains("RawScreen") })
+
+        // Stage 4: Graceful Fallback Wrapper for arbitrary text or partial snippet
+        val rawArbitrary = "Build a todo app with list and add button"
+        val parsedFallback = com.example.data.generator.AiCodeParser.parse(rawArbitrary)
+        assertTrue(parsedFallback.files.any { it.content.contains("class MainActivity") })
+    }
+
+    @Test
+    fun backgroundFactoryState_updatesStateAndClampsProgress() {
+        val manager = com.example.data.service.BackgroundTaskManager
+        manager.updateState(
+            isBusy = true,
+            title = "Compiling APK",
+            message = "Running dx...",
+            progress = 1.45f // progress over 1.0f should clamp to 1.0f
+        )
+        val state = manager.taskState.value
+        assertTrue(state.isBusy)
+        assertEquals("Compiling APK", state.title)
+        assertEquals("Running dx...", state.message)
+        assertEquals(1.0f, state.progress, 0.001f)
+
+        manager.updateState(
+            isBusy = false,
+            title = "Build Complete",
+            message = "Success",
+            progress = -0.2f // progress under 0f should clamp to 0f
+        )
+        val clampedState = manager.taskState.value
+        assertFalse(clampedState.isBusy)
+        assertEquals(0.0f, clampedState.progress, 0.001f)
+
+        manager.cancelTask(null)
+        val cancelledState = manager.taskState.value
+        assertFalse(cancelledState.isBusy)
+        assertEquals("Cancelled", cancelledState.message)
+    }
 }
 
 

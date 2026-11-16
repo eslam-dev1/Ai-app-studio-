@@ -97,6 +97,7 @@ import com.example.data.generator.BundledModelState
 import com.example.data.generator.DeviceHardwareProfile
 import com.example.data.generator.DeviceHardwareProfiler
 import com.example.data.generator.ModelLinkVerificationState
+import com.example.data.preferences.MonthlyUsageAlertState
 import com.example.model.AiEngineMode
 import com.example.model.GenerationUiState
 import com.example.model.LocalModelDownloadState
@@ -106,6 +107,7 @@ import com.example.model.StudioSettings
 import com.example.ui.components.CyberCodeFactoryCard
 import com.example.ui.components.CyberGradientCard
 import com.example.ui.components.LocalAiModelManagerPanel
+import com.example.ui.components.MonthlyUsageWarningBanner
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.CyberPurple
@@ -134,6 +136,7 @@ fun GeneratorScreen(
     localModelDownloadState: LocalModelDownloadState = LocalModelDownloadState.Idle,
     bundledModelState: BundledModelState = BundledModelState.Idle,
     modelVerificationStates: Map<String, ModelLinkVerificationState> = emptyMap(),
+    monthlyUsageAlert: MonthlyUsageAlertState = MonthlyUsageAlertState(),
     onEngineModeChange: (AiEngineMode) -> Unit,
     onCloudModelChange: (String) -> Unit = {},
     onImportLocalModelUri: (Uri) -> Unit = {},
@@ -350,6 +353,14 @@ fun GeneratorScreen(
                             textAlign = TextAlign.Center,
                             color = MaterialTheme.colorScheme.onBackground,
                             modifier = Modifier.testTag("home_hero_headline")
+                        )
+                    }
+
+                    // Monthly API Usage Threshold Warning Banner
+                    AnimatedVisibility(visible = monthlyUsageAlert.shouldShowWarning) {
+                        MonthlyUsageWarningBanner(
+                            alertState = monthlyUsageAlert,
+                            onOpenSettings = onOpenSettings
                         )
                     }
 
@@ -681,6 +692,8 @@ fun GeneratorScreen(
                                 stepMessage = active.stepMessage,
                                 engineLabel = active.engineLabel,
                                 streamingCode = active.streamingPreview,
+                                buildPhase = active.buildPhase,
+                                progress = active.progress,
                                 onCancel = onCancelGeneration
                             )
                         }

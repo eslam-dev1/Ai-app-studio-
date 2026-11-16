@@ -23,7 +23,18 @@ data class ChatCompletionResponse(
     val id: String? = null,
     val model: String? = null,
     val choices: List<ChatChoice> = emptyList(),
-    val error: ApiErrorDetail? = null
+    val error: ApiErrorDetail? = null,
+    val usage: ChatUsage? = null
+)
+
+@Serializable
+data class ChatUsage(
+    @SerialName("prompt_tokens")
+    val promptTokens: Long = 0L,
+    @SerialName("completion_tokens")
+    val completionTokens: Long = 0L,
+    @SerialName("total_tokens")
+    val totalTokens: Long = 0L
 )
 
 @Serializable

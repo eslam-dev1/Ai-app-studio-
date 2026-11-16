@@ -3,13 +3,12 @@ package com.example.ui.components
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,20 +18,19 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -53,6 +51,8 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -60,42 +60,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.diagnostics.FactoryTelemetryCalculator
+import com.example.model.BuildPhase
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.CyberPurple
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.LocalStudioCyberPalette
-import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
-
-private val DEFAULT_FACTORY_KOTLIN_SNIPPET = """
-    @Composable
-    fun AppStudioScreen(viewModel: AppViewModel = viewModel()) {
-        val tasks = remember { mutableStateListOf("Design UI", "Wire State", "Build APK") }
-        var isActive by remember { mutableStateOf(true) }
-
-        Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
-            LazyColumn(
-                contentPadding = padding,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(tasks) { item ->
-                    ElevatedCard(shape = RoundedCornerShape(18.dp)) {
-                        Text(text = item, style = MaterialTheme.typography.titleMedium)
-                    }
-                }
-            }
-        }
-    }
-""".trimIndent()
-
-private val MICRO_STATUS_TICKERS = listOf(
-    "Forging UI elements...",
-    "Weaving logic threads...",
-    "Validating codebase..."
-)
+import kotlinx.coroutines.delay
 
 @Composable
 fun CyberCodeFactoryCard(
@@ -105,57 +80,26 @@ fun CyberCodeFactoryCard(
     stepMessage: String,
     engineLabel: String,
     streamingCode: String = "",
+    buildPhase: BuildPhase = when (stepIndex.coerceIn(0, totalSteps)) {
+        0 -> BuildPhase.PROMPTING
+        1 -> BuildPhase.GENERATING_CODE
+        else -> BuildPhase.PARSING_FILES
+    },
+    progress: Float = when (stepIndex.coerceIn(0, totalSteps)) {
+        0 -> 0.12f
+        1 -> 0.45f
+        2 -> 0.85f
+        else -> 0.96f
+    },
     onCancel: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val palette = LocalStudioCyberPalette.current
-
-    // 3 server nodes blinking sequentially every 0.5s (500ms)
-    var activeNodeIndex by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(500L)
-            activeNodeIndex = (activeNodeIndex + 1) % 3
-        }
+    val activeNodeIndex = remember(buildPhase) {
+        FactoryTelemetryCalculator.activeNodeForPhase(buildPhase)
     }
 
-    // Rotating micro-status ticker
-    var tickerIndex by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(1800L)
-            tickerIndex = (tickerIndex + 1) % MICRO_STATUS_TICKERS.size
-        }
-    }
-
-    // Character-by-character typewriter effect over live or simulated Kotlin Compose code
-    val sourceCodeToType = remember(streamingCode) {
-        if (streamingCode.isNotBlank()) streamingCode.takeLast(1400) else DEFAULT_FACTORY_KOTLIN_SNIPPET
-    }
-    var typedCharCount by remember { mutableIntStateOf(0) }
-    LaunchedEffect(sourceCodeToType) {
-        if (streamingCode.isNotBlank()) {
-            // Advance swiftly toward the latest streamed token count
-            while (typedCharCount < sourceCodeToType.length) {
-                val jump = ((sourceCodeToType.length - typedCharCount) / 8).coerceIn(1, 14)
-                typedCharCount = (typedCharCount + jump).coerceAtMost(sourceCodeToType.length)
-                delay(24L)
-            }
-        } else {
-            typedCharCount = 0
-            while (true) {
-                if (typedCharCount < sourceCodeToType.length) {
-                    typedCharCount += 2
-                    delay(26L)
-                } else {
-                    delay(900L)
-                    typedCharCount = 12
-                }
-            }
-        }
-    }
-
-    // Glowing cyan block cursor blink
+    // Glowing cyan cursor blink
     var cursorVisible by remember { mutableIntStateOf(1) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -164,24 +108,9 @@ fun CyberCodeFactoryCard(
         }
     }
 
-    // Smooth animated progress readout (22% -> 74% -> 94% across steps)
-    val baseProgress = when (stepIndex.coerceIn(0, totalSteps)) {
-        0 -> 0.34f
-        1 -> 0.74f
-        2 -> 0.91f
-        else -> 0.97f
-    }
-    val progressTransition = rememberInfiniteTransition(label = "factory_progress_wave")
-    val wavePulse by progressTransition.animateFloat(
-        initialValue = -0.03f,
-        targetValue = 0.04f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1300, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "progress_pulse"
-    )
-    val waveShift by progressTransition.animateFloat(
+    // Smooth gradient sweep along the real progress bar
+    val shimmerTransition = rememberInfiniteTransition(label = "factory_progress_shimmer")
+    val waveShift by shimmerTransition.animateFloat(
         initialValue = 0f,
         targetValue = 600f,
         animationSpec = infiniteRepeatable(
@@ -190,8 +119,30 @@ fun CyberCodeFactoryCard(
         ),
         label = "progress_wave_shift"
     )
-    val effectiveProgress = (baseProgress + wavePulse).coerceIn(0.12f, 0.99f)
-    val percentInt = (effectiveProgress * 100f).toInt().coerceIn(1, 99)
+
+    // Real execution progress (0.0f..1.0f) interpolated cleanly from ViewModel/service telemetry
+    val clampedProgress = progress.coerceIn(0f, 1f)
+    val animatedProgress by animateFloatAsState(
+        targetValue = clampedProgress,
+        animationSpec = tween(durationMillis = 250, easing = LinearEasing),
+        label = "factory_real_progress"
+    )
+    val percentInt = (animatedProgress * 100f).toInt().coerceIn(0, 100)
+
+    val sanitizedCode = remember(streamingCode) {
+        FactoryTelemetryCalculator.sanitizeStreamingCode(streamingCode)
+    }
+    val liveStatusOperation = stepMessage.ifBlank { "Executing build pipeline…" }
+    val displayCode = remember(sanitizedCode, engineLabel, liveStatusOperation) {
+        if (sanitizedCode.isNotBlank()) {
+            sanitizedCode
+        } else {
+            "// [$engineLabel] $liveStatusOperation"
+        }
+    }
+    val codeLines = remember(displayCode) {
+        displayCode.split('\n').ifEmpty { listOf("") }
+    }
 
     CyberGradientCard(
         cornerRadius = 22.dp,
@@ -207,7 +158,7 @@ fun CyberCodeFactoryCard(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. Card Header: "BUILDING [ProjectName]..." + Engine chip + optional Cancel
+            // 1. Card Header: "BUILDING [ProjectName]..." + Live Engine & Phase + Cancel
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -227,7 +178,7 @@ fun CyberCodeFactoryCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "$engineLabel • $stepMessage",
+                        text = "$engineLabel • $liveStatusOperation",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -250,45 +201,60 @@ fun CyberCodeFactoryCard(
                 }
             }
 
-            // 3 Pulsing Green Server Nodes (blinking sequentially every 0.5s)
+            // 2. Real Pipeline Stage Nodes (COMPILING • GENERATING • ASSEMBLING) driven by BuildPhase
             val serverNodes = listOf("COMPILING", "GENERATING", "ASSEMBLING")
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(10.dp))
                     .background(palette.cardSurfaceHigh.copy(alpha = 0.72f))
-                    .border(1.dp, palette.cardBorder, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 serverNodes.forEachIndexed { idx, label ->
-                    val isLit = idx == activeNodeIndex
+                    val isActive = idx == activeNodeIndex
+                    val isCompleted = idx < activeNodeIndex
+                    val stateDescription = when {
+                        isActive -> "$label active"
+                        isCompleted -> "$label completed"
+                        else -> "$label pending"
+                    }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        modifier = Modifier.testTag("factory_node_${label.lowercase()}")
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .testTag("factory_node_${label.lowercase()}")
+                            .semantics { contentDescription = stateDescription }
                     ) {
                         Box(
                             modifier = Modifier
                                 .size(8.dp)
                                 .clip(CircleShape)
                                 .background(
-                                    if (isLit) CyberEmerald else CyberEmerald.copy(alpha = 0.25f)
+                                    when {
+                                        isActive -> CyberEmerald
+                                        isCompleted -> CyberCyan.copy(alpha = 0.75f)
+                                        else -> CyberEmerald.copy(alpha = 0.22f)
+                                    }
                                 )
                         )
                         Text(
                             text = label,
                             fontFamily = JetBrainsMonoFamily,
                             fontSize = 10.sp,
-                            fontWeight = if (isLit) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isLit) palette.accentEmerald else MaterialTheme.colorScheme.onSurfaceVariant
+                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                            color = when {
+                                isActive -> palette.accentEmerald
+                                isCompleted -> palette.accentCyan
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                     }
                 }
             }
 
-            // 2. Compact Rotating Dual-Gear Assembly (Top-Center, ~64.dp height)
+            // 3. Compact Rotating Dual-Gear Assembly above the transparent code viewport
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -305,14 +271,12 @@ fun CyberCodeFactoryCard(
                 )
             }
 
-            // 3. Live Streaming Code Typewriter Window with Matrix Data Particles
+            // 4. Borderless & Transparent Code Stream Container (floats seamlessly on translucent card)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 136.dp, max = 186.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(palette.terminalSurface)
-                    .border(1.dp, palette.accentCyan.copy(alpha = 0.28f), RoundedCornerShape(14.dp))
+                    .height(140.dp)
+                    .background(Color.Transparent)
                     .testTag("live_streaming_code_preview")
             ) {
                 MatrixParticleBackdrop(
@@ -321,49 +285,62 @@ fun CyberCodeFactoryCard(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                val visibleCode = sourceCodeToType.take(typedCharCount.coerceAtMost(sourceCodeToType.length))
-                val scrollState = rememberScrollState()
-                LaunchedEffect(visibleCode.length) {
-                    scrollState.animateScrollTo(scrollState.maxValue)
+                val listState = rememberLazyListState()
+                LaunchedEffect(codeLines.size, displayCode.length) {
+                    if (codeLines.isNotEmpty()) {
+                        listState.scrollToItem(codeLines.lastIndex)
+                    }
                 }
 
-                Column(
+                LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(scrollState)
-                        .horizontalScroll(rememberScrollState())
-                        .padding(12.dp)
+                        .background(Color.Transparent)
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Text(
-                        text = buildAnnotatedString {
-                            withStyle(
-                                SpanStyle(
-                                    color = palette.terminalText,
-                                    fontFamily = JetBrainsMonoFamily,
-                                    fontSize = 11.sp
-                                )
-                            ) {
-                                append(visibleCode)
-                            }
-                            if (cursorVisible == 1) {
+                    itemsIndexed(codeLines) { index, lineText ->
+                        val isLastLine = index == codeLines.lastIndex
+                        val codeInk = if (palette.isDark) {
+                            palette.terminalText
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        }
+                        Text(
+                            text = buildAnnotatedString {
                                 withStyle(
                                     SpanStyle(
-                                        color = CyberCyan,
+                                        color = codeInk,
                                         fontFamily = JetBrainsMonoFamily,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp
+                                        fontSize = 11.sp
                                     )
                                 ) {
-                                    append("█")
+                                    append(lineText)
                                 }
-                            }
-                        },
-                        lineHeight = 16.sp
-                    )
+                                if (isLastLine && cursorVisible == 1) {
+                                    withStyle(
+                                        SpanStyle(
+                                            color = palette.accentCyan,
+                                            fontFamily = JetBrainsMonoFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                    ) {
+                                        append(" █")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            softWrap = true,
+                            overflow = TextOverflow.Clip,
+                            lineHeight = 16.sp
+                        )
+                    }
                 }
             }
 
-            // 4. Digital Progress Bar + Percentage + Rotating Micro-Status Ticker
+            // 5. Real Live Progress Bar + Exact Percentage + Real Bottom Status Ticker
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Box(
                     modifier = Modifier
@@ -375,7 +352,7 @@ fun CyberCodeFactoryCard(
                 ) {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth(effectiveProgress)
+                            .fillMaxWidth(animatedProgress.coerceAtLeast(0.02f))
                             .height(10.dp)
                             .clip(RoundedCornerShape(50))
                             .background(
@@ -394,13 +371,15 @@ fun CyberCodeFactoryCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = MICRO_STATUS_TICKERS[tickerIndex],
+                        text = liveStatusOperation,
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = JetBrainsMonoFamily,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("factory_status_ticker")
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
@@ -408,7 +387,8 @@ fun CyberCodeFactoryCard(
                         style = MaterialTheme.typography.labelMedium,
                         fontFamily = JetBrainsMonoFamily,
                         fontWeight = FontWeight.Bold,
-                        color = palette.accentEmerald
+                        color = palette.accentEmerald,
+                        modifier = Modifier.testTag("factory_progress_percent_text")
                     )
                 }
             }
@@ -539,13 +519,13 @@ private fun MatrixParticleBackdrop(
             val y = phase * (size.height + 40f) - 20f
             val streamColor = if (col % 2 == 0) accentEmerald else accentCyan
             drawRoundRect(
-                color = streamColor.copy(alpha = 0.08f),
+                color = streamColor.copy(alpha = 0.06f),
                 topLeft = Offset(x, y),
                 size = Size(width = 3f, height = 22f),
                 cornerRadius = CornerRadius(2f, 2f)
             )
             drawCircle(
-                color = streamColor.copy(alpha = 0.16f),
+                color = streamColor.copy(alpha = 0.12f),
                 radius = 2f,
                 center = Offset(x + 1.5f, y + 24f)
             )

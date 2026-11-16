@@ -21,23 +21,37 @@ import com.example.data.generator.BenchmarkPromptResult
 import com.example.data.git.GitRepositoryManager
 import com.example.data.github.GitHubBuildRepository
 import com.example.data.github.GitHubWorkflowInjector
+import com.example.data.service.BackgroundFactoryState
+import com.example.data.service.BackgroundTaskManager
 import com.example.data.local.CustomSqlTableEntity
 import com.example.data.local.ProjectSqlEntity
 import com.example.data.local.RoomCodeGenerator
 import com.example.data.local.SqlColumnSpec
+import com.example.data.preferences.ApiCredentialValidator
+import com.example.data.preferences.ApiKeyVerificationStatus
+import com.example.data.preferences.ApiUsageHeaderParser
+import com.example.data.preferences.ApiUsageSummary
+import com.example.data.preferences.ApiUsageThresholdEvaluator
+import com.example.data.preferences.ConfiguredCloudProvider
+import com.example.data.preferences.MonthlyUsageAlertState
+import com.example.data.preferences.ParsedUsageHeaders
+import com.example.data.preferences.SavedApiKeyHealthState
 import com.example.data.preferences.SettingsDataStore
 import com.example.data.refactor.AiCodeRefactorRepository
 import com.example.data.storage.DebouncedProjectAutoSaver
 import com.example.data.storage.ProjectStorageRepository
 import com.example.data.templates.StarterTemplate
 import com.example.data.templates.StarterTemplateCatalog
+import com.example.diagnostics.FactoryTelemetryCalculator
 import com.example.diagnostics.ProjectStaticAnalyzer
 import com.example.model.AiEngineMode
+import com.example.model.ApiUsageLimitMetric
 import com.example.model.AppThemeMode
-import com.example.model.EditorThemeMode
 import com.example.model.AutoSaveStatus
+import com.example.model.BuildPhase
 import com.example.model.ConsoleLogEntry
 import com.example.model.ConsoleLogLevel
+import com.example.model.EditorThemeMode
 import com.example.model.GeneratedFile
 import com.example.model.GenerationUiState
 import com.example.model.GitRepoState
@@ -56,12 +70,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.UUID
 
@@ -88,6 +105,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _activeProject = MutableStateFlow<StudioProject?>(null)
     val activeProject: StateFlow<StudioProject?> = _activeProject.asStateFlow()
+
+    val backgroundTaskState: StateFlow<BackgroundFactoryState> = BackgroundTaskManager.taskState
 
     private val _gitState = MutableStateFlow(GitRepoState())
     val gitState: StateFlow<GitRepoState> = _gitState.asStateFlow()
@@ -144,6 +163,35 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val _errorDialogMessage = MutableStateFlow<String?>(null)
     val errorDialogMessage: StateFlow<String?> = _errorDialogMessage.asStateFlow()
 
+    private val _geminiVerificationState = MutableStateFlow<ApiKeyVerificationStatus>(ApiKeyVerificationStatus.Idle)
+    val geminiVerificationState: StateFlow<ApiKeyVerificationStatus> = _geminiVerificationState.asStateFlow()
+
+    private val _openRouterVerificationState = MutableStateFlow<ApiKeyVerificationStatus>(ApiKeyVerificationStatus.Idle)
+    val openRouterVerificationState: StateFlow<ApiKeyVerificationStatus> = _openRouterVerificationState.asStateFlow()
+
+    private val _savedKeyHealthState = MutableStateFlow<SavedApiKeyHealthState>(SavedApiKeyHealthState.NotConfigured)
+    val savedKeyHealthState: StateFlow<SavedApiKeyHealthState> = _savedKeyHealthState.asStateFlow()
+
+    val apiUsageSummary: StateFlow<ApiUsageSummary> = settingsDataStore.apiUsageSummaryFlow
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ApiUsageSummary())
+
+    val monthlyUsageAlertState: StateFlow<MonthlyUsageAlertState> = combine(
+        apiUsageSummary,
+        settings
+    ) { summary, currentSettings ->
+        ApiUsageThresholdEvaluator.evaluate(summary, currentSettings)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = ApiUsageThresholdEvaluator.evaluate(ApiUsageSummary(), StudioSettings())
+    )
+
+    private val usageTelemetryMutex = Mutex()
+
+    val isCredentialStorageHardwareBacked: Boolean by lazy {
+        settingsDataStore.isHardwareKeystoreBacked()
+    }
+
     private val autoSaver = DebouncedProjectAutoSaver(
         scope = viewModelScope,
         debounceMs = 650L,
@@ -171,6 +219,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private var bundledBootstrapJob: Job? = null
     private var builtInMirrorDownloadJob: Job? = null
     private var benchmarkJob: Job? = null
+    private var verifySavedKeyJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -190,6 +239,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         builtInMirrorDownloadJob?.cancel()
         builtInMirrorDownloadJob = null
         val app = getApplication<Application>()
+        BackgroundTaskManager.cancelTask(app)
         val targetFile = BundledModelManager.getTargetModelFile(app)
         val hasValidTarget = BundledModelManager.verifyModelFileIntegrity(
             file = targetFile,
@@ -207,8 +257,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         if (builtInMirrorDownloadJob?.isActive == true) return
         bundledBootstrapJob?.cancel()
         builtInMirrorDownloadJob?.cancel()
-        builtInMirrorDownloadJob = viewModelScope.launch {
-            val app = getApplication<Application>()
+        val app = getApplication<Application>()
+        BackgroundTaskManager.startTask(app, "Downloading Built-in AI Model", "Contacting mirrors…")
+        builtInMirrorDownloadJob = BackgroundTaskManager.scope.launch {
             val totalMirrors = BundledModelManager.BUILT_IN_FALLBACK_MIRRORS.size
             val firstMirrorLabel = BundledModelManager.BUILT_IN_FALLBACK_MIRRORS
                 .firstOrNull()?.label ?: "Mirror 1"
@@ -235,6 +286,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             totalBytes = 0L,
                             percent = 0
                         )
+                        BackgroundTaskManager.updateProgress(
+                            app,
+                            "Downloading Built-in AI Model",
+                            "Switching to ${mirror.label} ($mirrorIdx/$total)…",
+                            0.05f
+                        )
                     },
                     onProgress = { mirrorIdx, total, mirror, downloaded, totalBytes, pct ->
                         _bundledModelState.value = BundledModelState.DownloadingFromMirror(
@@ -244,6 +301,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             downloadedBytes = downloaded,
                             totalBytes = totalBytes,
                             percent = pct
+                        )
+                        val downMb = downloaded / (1024L * 1024L)
+                        val totMb = totalBytes / (1024L * 1024L)
+                        BackgroundTaskManager.updateProgress(
+                            app,
+                            "Downloading Built-in AI Model",
+                            "${mirror.label} • $downMb MB / $totMb MB ($pct%)",
+                            pct / 100f
                         )
                     }
                 )
@@ -256,6 +321,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     )
                     _bundledModelState.value = BundledModelState.Initializing(
                         "Downloaded via ${result.mirrorUsed.label} • Initializing MediaPipe LLM…"
+                    )
+                    BackgroundTaskManager.updateProgress(
+                        app,
+                        "Downloading Built-in AI Model",
+                        "Initializing MediaPipe LLM…",
+                        0.95f
                     )
                     runCatching {
                         generatorRepository.initializeLocalModel(
@@ -271,10 +342,20 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         )
                         _snackbarMessage.value =
                             "Built-in AI downloaded (${result.mirrorUsed.label}) & initialized!"
+                        BackgroundTaskManager.finishTask(
+                            app,
+                            "Built-in AI Model Ready",
+                            "Initialized via ${result.mirrorUsed.label} • Ready for offline inference"
+                        )
                     }.onFailure { err ->
                         _bundledModelState.value = BundledModelState.Unavailable(
                             err.localizedMessage
                                 ?: "Downloaded built-in model, but MediaPipe failed to initialize."
+                        )
+                        BackgroundTaskManager.failTask(
+                            app,
+                            "Built-in AI Model",
+                            err.localizedMessage ?: "MediaPipe initialization failed"
                         )
                     }
                     refreshDeviceHardwareProfile()
@@ -282,8 +363,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     _bundledModelState.value = BundledModelState.Unavailable(
                         err.localizedMessage ?: "All fallback mirrors failed to download Built-in AI."
                     )
+                    BackgroundTaskManager.failTask(
+                        app,
+                        "Built-in AI Model",
+                        err.localizedMessage ?: "All mirrors failed"
+                    )
                 }
             } catch (ce: CancellationException) {
+                BackgroundTaskManager.cancelTask(app)
                 if (!BundledModelManager.hasBundledModelAsset(app)) {
                     _bundledModelState.value = BundledModelState.AssetMissingNeedsDownload()
                 } else {
@@ -743,11 +830,323 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun saveSettings(updated: StudioSettings) {
+        val geminiCheck = ApiCredentialValidator.validateGeminiKeyFormat(updated.geminiApiKey)
+        if (!geminiCheck.isValidShape) {
+            _snackbarMessage.value = geminiCheck.warningMessage ?: "Invalid Gemini API key format"
+            return
+        }
+        val openRouterCheck = ApiCredentialValidator.validateOpenRouterKeyFormat(updated.openRouterApiKey)
+        if (!openRouterCheck.isValidShape) {
+            _snackbarMessage.value = openRouterCheck.warningMessage ?: "Invalid OpenRouter API key format"
+            return
+        }
         generatorRepository.updateConfiguration(updated)
         viewModelScope.launch {
             settingsDataStore.saveAll(updated)
-            _snackbarMessage.value = "Settings saved"
+            _snackbarMessage.value = "Settings encrypted & saved to DataStore"
+            verifySavedProviderCredentials(updated)
         }
+    }
+
+    fun saveCloudCredentials(openRouterKey: String, geminiKey: String, modelId: String) {
+        val geminiCheck = ApiCredentialValidator.validateGeminiKeyFormat(geminiKey)
+        if (!geminiCheck.isValidShape) {
+            _snackbarMessage.value = geminiCheck.warningMessage ?: "Invalid Gemini API key format"
+            return
+        }
+        val openRouterCheck = ApiCredentialValidator.validateOpenRouterKeyFormat(openRouterKey)
+        if (!openRouterCheck.isValidShape) {
+            _snackbarMessage.value = openRouterCheck.warningMessage ?: "Invalid OpenRouter API key format"
+            return
+        }
+        val cleanOr = openRouterKey.trim()
+        val cleanGem = geminiKey.trim()
+        val nextSettings = settings.value.copy(
+            openRouterApiKey = cleanOr,
+            geminiApiKey = cleanGem,
+            openRouterModel = modelId
+        )
+        generatorRepository.updateConfiguration(nextSettings)
+        viewModelScope.launch {
+            settingsDataStore.updateCloudSettings(cleanOr, cleanGem, modelId)
+            _snackbarMessage.value = "API credentials encrypted & saved to DataStore"
+            verifySavedProviderCredentials(nextSettings)
+        }
+    }
+
+    fun clearGeminiApiKey() {
+        val nextSettings = settings.value.copy(geminiApiKey = "")
+        generatorRepository.updateConfiguration(nextSettings)
+        _geminiVerificationState.value = ApiKeyVerificationStatus.Idle
+        viewModelScope.launch {
+            settingsDataStore.clearGeminiApiKey()
+            _snackbarMessage.value = "Gemini API key cleared from DataStore"
+            verifySavedProviderCredentials(nextSettings)
+        }
+    }
+
+    fun clearOpenRouterApiKey() {
+        val nextSettings = settings.value.copy(openRouterApiKey = "")
+        generatorRepository.updateConfiguration(nextSettings)
+        _openRouterVerificationState.value = ApiKeyVerificationStatus.Idle
+        viewModelScope.launch {
+            settingsDataStore.clearOpenRouterApiKey()
+            _snackbarMessage.value = "OpenRouter API key cleared from DataStore"
+            verifySavedProviderCredentials(nextSettings)
+        }
+    }
+
+    fun clearAllCloudCredentials() {
+        val nextSettings = settings.value.copy(openRouterApiKey = "", geminiApiKey = "")
+        generatorRepository.updateConfiguration(nextSettings)
+        _geminiVerificationState.value = ApiKeyVerificationStatus.Idle
+        _openRouterVerificationState.value = ApiKeyVerificationStatus.Idle
+        viewModelScope.launch {
+            settingsDataStore.clearAllCloudCredentials()
+            _snackbarMessage.value = "All cloud API credentials cleared"
+            verifySavedProviderCredentials(nextSettings)
+        }
+    }
+
+    fun verifySavedProviderCredentials(targetSettings: StudioSettings = settings.value) {
+        verifySavedKeyJob?.cancel()
+        val resolved = ApiCredentialValidator.resolveConfiguredProvider(targetSettings)
+        if (resolved == null) {
+            _savedKeyHealthState.value = SavedApiKeyHealthState.NotConfigured
+            return
+        }
+        val providerLabel = if (resolved.isFromBuildConfig) {
+            "${resolved.provider.displayName} (Env Secret)"
+        } else {
+            resolved.provider.displayName
+        }
+        _savedKeyHealthState.value = SavedApiKeyHealthState.Checking(
+            providerLabel = providerLabel,
+            maskedKey = resolved.maskedKey
+        )
+        verifySavedKeyJob = viewModelScope.launch {
+            val (_, healthState) = ApiCredentialValidator.verifySavedProviderHealth(targetSettings)
+            _savedKeyHealthState.value = healthState
+            when (healthState) {
+                is SavedApiKeyHealthState.Verified -> {
+                    val validStatus = ApiKeyVerificationStatus.Valid(
+                        provider = healthState.providerLabel,
+                        detail = healthState.detail,
+                        latencyMs = healthState.latencyMs,
+                        httpStatusCode = healthState.httpStatusCode,
+                        usageHeaders = healthState.usageHeaders
+                    )
+                    if (resolved.provider == ConfiguredCloudProvider.GEMINI) {
+                        _geminiVerificationState.value = validStatus
+                    } else {
+                        _openRouterVerificationState.value = validStatus
+                    }
+                    recordApiValidationTelemetry(
+                        providerName = healthState.providerLabel,
+                        httpStatusCode = healthState.httpStatusCode,
+                        latencyMs = healthState.latencyMs,
+                        parsedHeaders = healthState.usageHeaders
+                    )
+                }
+                is SavedApiKeyHealthState.Error -> {
+                    val invalidStatus = ApiKeyVerificationStatus.Invalid(
+                        errorMessage = healthState.message,
+                        latencyMs = healthState.latencyMs,
+                        httpStatusCode = healthState.httpStatusCode,
+                        usageHeaders = healthState.usageHeaders
+                    )
+                    if (resolved.provider == ConfiguredCloudProvider.GEMINI) {
+                        _geminiVerificationState.value = invalidStatus
+                    } else {
+                        _openRouterVerificationState.value = invalidStatus
+                    }
+                    if (healthState.latencyMs != null || healthState.httpStatusCode != null) {
+                        recordApiValidationTelemetry(
+                            providerName = healthState.providerLabel,
+                            httpStatusCode = healthState.httpStatusCode,
+                            latencyMs = healthState.latencyMs,
+                            parsedHeaders = healthState.usageHeaders
+                        )
+                    }
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    fun verifyGeminiApiKey(apiKey: String) {
+        viewModelScope.launch {
+            _geminiVerificationState.value = ApiKeyVerificationStatus.Verifying
+            val status = ApiCredentialValidator.verifyGeminiApiKey(apiKey)
+            _geminiVerificationState.value = status
+            when (status) {
+                is ApiKeyVerificationStatus.Valid -> {
+                    recordApiValidationTelemetry(
+                        providerName = status.provider,
+                        httpStatusCode = status.httpStatusCode,
+                        latencyMs = status.latencyMs,
+                        parsedHeaders = status.usageHeaders
+                    )
+                }
+                is ApiKeyVerificationStatus.Invalid -> {
+                    if (status.latencyMs != null || status.httpStatusCode != null) {
+                        recordApiValidationTelemetry(
+                            providerName = ConfiguredCloudProvider.GEMINI.displayName,
+                            httpStatusCode = status.httpStatusCode,
+                            latencyMs = status.latencyMs,
+                            parsedHeaders = status.usageHeaders
+                        )
+                    }
+                }
+                else -> Unit
+            }
+            if (apiKey.trim() == settings.value.geminiApiKey.trim() && apiKey.isNotBlank()) {
+                _savedKeyHealthState.value = when (status) {
+                    is ApiKeyVerificationStatus.Valid -> SavedApiKeyHealthState.Verified(
+                        providerLabel = ConfiguredCloudProvider.GEMINI.displayName,
+                        maskedKey = com.example.data.preferences.SecureCredentialCipher.maskSecret(apiKey),
+                        detail = status.detail,
+                        latencyMs = status.latencyMs,
+                        httpStatusCode = status.httpStatusCode,
+                        usageHeaders = status.usageHeaders
+                    )
+                    is ApiKeyVerificationStatus.Invalid -> SavedApiKeyHealthState.Error(
+                        providerLabel = ConfiguredCloudProvider.GEMINI.displayName,
+                        maskedKey = com.example.data.preferences.SecureCredentialCipher.maskSecret(apiKey),
+                        message = status.errorMessage,
+                        latencyMs = status.latencyMs,
+                        httpStatusCode = status.httpStatusCode,
+                        usageHeaders = status.usageHeaders
+                    )
+                    else -> _savedKeyHealthState.value
+                }
+            }
+        }
+    }
+
+    fun verifyOpenRouterApiKey(apiKey: String) {
+        viewModelScope.launch {
+            _openRouterVerificationState.value = ApiKeyVerificationStatus.Verifying
+            val status = ApiCredentialValidator.verifyOpenRouterApiKey(apiKey)
+            _openRouterVerificationState.value = status
+            when (status) {
+                is ApiKeyVerificationStatus.Valid -> {
+                    recordApiValidationTelemetry(
+                        providerName = status.provider,
+                        httpStatusCode = status.httpStatusCode,
+                        latencyMs = status.latencyMs,
+                        parsedHeaders = status.usageHeaders
+                    )
+                }
+                is ApiKeyVerificationStatus.Invalid -> {
+                    if (status.latencyMs != null || status.httpStatusCode != null) {
+                        recordApiValidationTelemetry(
+                            providerName = ConfiguredCloudProvider.OPENROUTER.displayName,
+                            httpStatusCode = status.httpStatusCode,
+                            latencyMs = status.latencyMs,
+                            parsedHeaders = status.usageHeaders
+                        )
+                    }
+                }
+                else -> Unit
+            }
+            if (apiKey.trim() == settings.value.openRouterApiKey.trim() && apiKey.isNotBlank()) {
+                _savedKeyHealthState.value = when (status) {
+                    is ApiKeyVerificationStatus.Valid -> SavedApiKeyHealthState.Verified(
+                        providerLabel = ConfiguredCloudProvider.OPENROUTER.displayName,
+                        maskedKey = com.example.data.preferences.SecureCredentialCipher.maskSecret(apiKey),
+                        detail = status.detail,
+                        latencyMs = status.latencyMs,
+                        httpStatusCode = status.httpStatusCode,
+                        usageHeaders = status.usageHeaders
+                    )
+                    is ApiKeyVerificationStatus.Invalid -> SavedApiKeyHealthState.Error(
+                        providerLabel = ConfiguredCloudProvider.OPENROUTER.displayName,
+                        maskedKey = com.example.data.preferences.SecureCredentialCipher.maskSecret(apiKey),
+                        message = status.errorMessage,
+                        latencyMs = status.latencyMs,
+                        httpStatusCode = status.httpStatusCode,
+                        usageHeaders = status.usageHeaders
+                    )
+                    else -> _savedKeyHealthState.value
+                }
+            }
+        }
+    }
+
+    private suspend fun recordApiValidationTelemetry(
+        providerName: String,
+        httpStatusCode: Int?,
+        latencyMs: Long?,
+        parsedHeaders: ParsedUsageHeaders?
+    ) {
+        usageTelemetryMutex.withLock {
+            val latest = settingsDataStore.apiUsageSummaryFlow.first()
+            val updated = ApiUsageHeaderParser.applyValidationResponse(
+                current = latest,
+                providerName = providerName,
+                httpStatusCode = httpStatusCode,
+                latencyMs = latencyMs,
+                parsed = parsedHeaders
+            )
+            settingsDataStore.saveApiUsageSummary(updated)
+        }
+    }
+
+    private suspend fun recordCloudGenerationTelemetry(
+        providerName: String,
+        tokensUsed: Long?,
+        latencyMs: Long
+    ) {
+        usageTelemetryMutex.withLock {
+            val latest = settingsDataStore.apiUsageSummaryFlow.first()
+            val updated = ApiUsageHeaderParser.applyGenerationUsage(
+                current = latest,
+                providerName = providerName,
+                tokensUsed = tokensUsed,
+                latencyMs = latencyMs
+            )
+            settingsDataStore.saveApiUsageSummary(updated)
+        }
+    }
+
+    fun updateMonthlyUsageThreshold(
+        enabled: Boolean,
+        metric: ApiUsageLimitMetric,
+        monthlyLimit: Long,
+        warningThresholdPercent: Int
+    ) {
+        if (monthlyLimit <= 0L) {
+            _snackbarMessage.value = "Monthly API limit must be greater than 0."
+            return
+        }
+        viewModelScope.launch {
+            settingsDataStore.updateMonthlyUsageThreshold(
+                enabled = enabled,
+                metric = metric,
+                monthlyLimit = monthlyLimit,
+                warningThresholdPercent = warningThresholdPercent
+            )
+            _snackbarMessage.value = if (enabled) {
+                "Monthly usage warning set (${warningThresholdPercent}% of $monthlyLimit ${metric.unitLabel})"
+            } else {
+                "Monthly API usage alerts disabled"
+            }
+        }
+    }
+
+    fun resetApiUsageStats() {
+        viewModelScope.launch {
+            usageTelemetryMutex.withLock {
+                settingsDataStore.clearApiUsageSummary()
+            }
+            _snackbarMessage.value = "API usage statistics reset"
+        }
+    }
+
+    fun resetCredentialVerification() {
+        _geminiVerificationState.value = ApiKeyVerificationStatus.Idle
+        _openRouterVerificationState.value = ApiKeyVerificationStatus.Idle
     }
 
     fun updateHuggingFaceToken(token: String) {
@@ -766,7 +1165,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun verifyAllPresetModelLinks(forceRefresh: Boolean = false) {
         if (!forceRefresh && verifyAllLinksJob?.isActive == true) return
         val currentMap = _modelVerificationStates.value
-        val presetsToVerify = LocalModelCatalog.presets.filter { preset ->
+        val presetsToVerify = LocalModelCatalog.allPresets.filter { preset ->
             if (forceRefresh) true
             else {
                 val existing = currentMap[preset.id]
@@ -831,6 +1230,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         modelDownloadJob = null
         _localModelDownloadState.value = LocalModelDownloadState.Idle
         _snackbarMessage.value = "Model download cancelled"
+        val app = getApplication<Application>()
+        BackgroundTaskManager.cancelTask(app)
     }
 
     fun downloadAndInitializeLocalModel(
@@ -848,8 +1249,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val hfToken = settings.value.huggingFaceToken.trim()
+        val app = getApplication<Application>()
         modelDownloadJob?.cancel()
-        modelDownloadJob = viewModelScope.launch {
+        BackgroundTaskManager.startTask(app, "Downloading $displayName", "Connecting to repository…")
+        modelDownloadJob = BackgroundTaskManager.scope.launch {
             var resolvedUrl = cleanUrl
             var resolvedFileName = fileNameHint
             var resolvedExpectedBytes = expectedSizeBytes
@@ -886,6 +1289,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                                 "Repository ${preset.repoId} is currently unreachable: ${verifiedState.reason}"
                             }
                             _localModelDownloadState.value = LocalModelDownloadState.Error(errMsg)
+                            BackgroundTaskManager.failTask(app, "Downloading $displayName", errMsg)
                             return@launch
                         }
                         else -> Unit
@@ -914,21 +1318,37 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             totalBytes = total,
                             percent = pct
                         )
+                        val downMb = downloaded / (1024L * 1024L)
+                        val totMb = total / (1024L * 1024L)
+                        BackgroundTaskManager.updateProgress(
+                            app,
+                            "Downloading $displayName",
+                            "$downMb MB / $totMb MB ($pct%)",
+                            pct / 100f
+                        )
                     }
                 )
                 settingsDataStore.updateOnDeviceModel(path, displayName, actualSize)
                 _localModelDownloadState.value = LocalModelDownloadState.Initializing(displayName)
+                BackgroundTaskManager.updateProgress(
+                    app,
+                    "Downloading $displayName",
+                    "Initializing MediaPipe LLM…",
+                    0.96f
+                )
                 generatorRepository.initializeLocalModel(path)
                 refreshDeviceHardwareProfile()
                 _localModelDownloadState.value = LocalModelDownloadState.Idle
                 _snackbarMessage.value = "Model downloaded & initialized offline: $displayName"
+                BackgroundTaskManager.finishTask(app, "Model Download Ready", "$displayName initialized offline.")
             } catch (ce: CancellationException) {
                 _localModelDownloadState.value = LocalModelDownloadState.Idle
+                BackgroundTaskManager.cancelTask(app)
                 throw ce
             } catch (ex: Exception) {
-                _localModelDownloadState.value = LocalModelDownloadState.Error(
-                    ex.localizedMessage ?: "Failed to download or initialize local model."
-                )
+                val err = ex.localizedMessage ?: "Failed to download or initialize local model."
+                _localModelDownloadState.value = LocalModelDownloadState.Error(err)
+                BackgroundTaskManager.failTask(app, "Downloading $displayName", err)
             }
         }
     }
@@ -972,13 +1392,25 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
         generationJob?.cancel()
         val currentSettings = settings.value
+        val app = getApplication<Application>()
+        val engineDisplayName = when (currentSettings.aiEngineMode) {
+            AiEngineMode.ON_DEVICE_MEDIAPIPE ->
+                currentSettings.localModelDisplayName.ifBlank { "MediaPipe Local AI" }
+            AiEngineMode.CLOUD_OPENROUTER ->
+                currentSettings.openRouterModel
+            AiEngineMode.LOCAL_SERVER ->
+                currentSettings.localServerModel.ifBlank { "Local Server" }
+        }
+        BackgroundTaskManager.startTask(app, "AI Code Factory", "Initializing $engineDisplayName…")
 
-        generationJob = viewModelScope.launch {
+        generationJob = BackgroundTaskManager.scope.launch {
             val generationStartMs = System.currentTimeMillis()
             _generationState.value = GenerationUiState.Generating(
                 stepIndex = 0,
-                stepMessage = "Designing architecture…",
-                engineLabel = currentSettings.aiEngineMode.shortLabel
+                stepMessage = "Initializing $engineDisplayName…",
+                engineLabel = currentSettings.aiEngineMode.shortLabel,
+                buildPhase = BuildPhase.PROMPTING,
+                progress = 0.06f
             )
             try {
                 val result = generatorRepository.generateApp(
@@ -986,19 +1418,59 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     settings = currentSettings,
                     onProgress = { step, message ->
                         _generationState.update { existing ->
-                            val prevPreview = (existing as? GenerationUiState.Generating)?.streamingPreview.orEmpty()
+                            val prev = existing as? GenerationUiState.Generating
+                            val phase = when {
+                                step <= 0 -> BuildPhase.PROMPTING
+                                step == 1 -> BuildPhase.GENERATING_CODE
+                                else -> BuildPhase.PARSING_FILES
+                            }
+                            val milestoneProgress = when (phase) {
+                                BuildPhase.PROMPTING -> 0.12f
+                                BuildPhase.GENERATING_CODE -> 0.18f
+                                BuildPhase.PARSING_FILES -> 0.85f
+                                BuildPhase.PACKAGING_APK -> 0.94f
+                            }
+                            BackgroundTaskManager.updateProgress(app, "AI Code Factory", message, milestoneProgress)
                             GenerationUiState.Generating(
                                 stepIndex = step,
                                 stepMessage = message,
                                 engineLabel = currentSettings.aiEngineMode.shortLabel,
-                                streamingPreview = prevPreview
+                                streamingPreview = prev?.streamingPreview.orEmpty(),
+                                buildPhase = phase,
+                                progress = maxOf(prev?.progress ?: 0f, milestoneProgress),
+                                charsReceived = prev?.charsReceived ?: 0,
+                                tokensReceived = prev?.tokensReceived ?: 0,
+                                activeFileLabel = prev?.activeFileLabel
                             )
                         }
                     },
                     onStreamPreview = { partialCode ->
+                        val sanitized = FactoryTelemetryCalculator.sanitizeStreamingCode(partialCode)
+                        val activeFile = FactoryTelemetryCalculator.extractActiveFileLabel(partialCode)
+                        val charCount = partialCode.length
                         _generationState.update { existing ->
-                            if (existing is GenerationUiState.Generating) {
-                                existing.copy(streamingPreview = partialCode)
+                            val prev = existing as? GenerationUiState.Generating
+                            if (prev != null) {
+                                val nextProgress = maxOf(
+                                    prev.progress,
+                                    FactoryTelemetryCalculator.calculateStreamProgress(charCount)
+                                )
+                                val dynamicStepMsg = if (activeFile != null) {
+                                    "Streaming $activeFile ($charCount chars)…"
+                                } else {
+                                    "Streaming Kotlin & Compose ($charCount chars)…"
+                                }
+                                BackgroundTaskManager.updateProgress(app, "AI Code Factory", dynamicStepMsg, nextProgress)
+                                prev.copy(
+                                    stepIndex = 1,
+                                    stepMessage = dynamicStepMsg,
+                                    streamingPreview = sanitized,
+                                    buildPhase = BuildPhase.GENERATING_CODE,
+                                    progress = nextProgress,
+                                    charsReceived = charCount,
+                                    tokensReceived = prev.tokensReceived + 1,
+                                    activeFileLabel = activeFile ?: prev.activeFileLabel
+                                )
                             } else {
                                 existing
                             }
@@ -1007,6 +1479,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 )
 
                 val totalGenerationLatencyMs = (System.currentTimeMillis() - generationStartMs).coerceAtLeast(150L)
+
+                if (currentSettings.aiEngineMode == AiEngineMode.CLOUD_OPENROUTER) {
+                    recordCloudGenerationTelemetry(
+                        providerName = result.modelUsed,
+                        tokensUsed = result.tokensUsed,
+                        latencyMs = totalGenerationLatencyMs
+                    )
+                }
 
                 val project = GitHubWorkflowInjector.injectBuildApkWorkflow(
                     StudioProject(
@@ -1020,6 +1500,41 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         lastGenerationLatencyMs = totalGenerationLatencyMs
                     )
                 )
+
+                val totalFiles = project.files.size.coerceAtLeast(1)
+                project.files.forEachIndexed { idx, file ->
+                    val shortName = file.path.substringAfterLast('/')
+                    val fileProgress = FactoryTelemetryCalculator.calculateFileWriteProgress(
+                        writtenFiles = idx + 1,
+                        totalFiles = totalFiles
+                    )
+                    BackgroundTaskManager.updateProgress(
+                        app,
+                        "AI Code Factory",
+                        "Writing $shortName (${idx + 1}/$totalFiles files)…",
+                        fileProgress
+                    )
+                    _generationState.update { existing ->
+                        val prev = existing as? GenerationUiState.Generating
+                        prev?.copy(
+                            stepIndex = 2,
+                            stepMessage = "Writing $shortName (${idx + 1}/$totalFiles files)…",
+                            buildPhase = BuildPhase.PARSING_FILES,
+                            progress = maxOf(prev.progress, fileProgress),
+                            activeFileLabel = shortName
+                        ) ?: existing
+                    }
+                }
+
+                _generationState.update { existing ->
+                    val prev = existing as? GenerationUiState.Generating
+                    prev?.copy(
+                        stepIndex = 2,
+                        stepMessage = "Packaging project workspace & static checks…",
+                        buildPhase = BuildPhase.PACKAGING_APK,
+                        progress = 0.98f
+                    ) ?: existing
+                }
 
                 val saved = storageRepository.saveProject(project)
                 _projects.value = storageRepository.loadAllProjects()
@@ -1037,9 +1552,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     projectId = saved.id,
                     appName = saved.appName
                 )
+                BackgroundTaskManager.finishTask(app, "AI Code Factory Ready", "Generated '${saved.appName}' successfully.")
             } catch (_: CancellationException) {
                 _generationState.value = GenerationUiState.Idle
                 _snackbarMessage.value = "Generation cancelled"
+                BackgroundTaskManager.cancelTask(app)
             } catch (ex: Exception) {
                 val msg = ex.localizedMessage ?: "App generation failed."
                 appendConsoleLog(
@@ -1049,6 +1566,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 _generationState.value = GenerationUiState.Error(msg)
                 _errorDialogMessage.value = msg
+                BackgroundTaskManager.failTask(app, "AI Code Factory", msg)
             }
         }
     }
@@ -1057,6 +1575,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         generationJob?.cancel()
         generationJob = null
         _generationState.value = GenerationUiState.Idle
+        val app = getApplication<Application>()
+        BackgroundTaskManager.cancelTask(app)
     }
 
     fun createProjectFromTemplate(
@@ -2099,9 +2619,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        viewModelScope.launch {
+        BackgroundTaskManager.scope.launch {
             _isCloudBuildBusy.value = true
             _cloudBuildProgress.value = "Running pre-build compiler diagnostics…"
+            BackgroundTaskManager.startTask(
+                context = getApplication(),
+                title = "Compiling ${project.appName}",
+                initialMessage = "Running pre-build diagnostics…"
+            )
             try {
                 autoSaver.flushNowBlocking()
                 val latestProject = _activeProject.value ?: project
@@ -2109,11 +2634,30 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 appendConsoleEntries(preBuildDiagnostics)
 
                 _cloudBuildProgress.value = "Preparing GitHub repository…"
+                BackgroundTaskManager.updateProgress(
+                    context = getApplication(),
+                    title = "Compiling ${latestProject.appName}",
+                    message = "Preparing GitHub repository…",
+                    progress = 0.25f
+                )
                 val result = gitHubRepository.pushProjectAndTriggerApkBuild(
                     project = latestProject,
                     pat = pat,
                     preferredUsername = currentSettings.gitHubUsername,
-                    onProgress = { msg -> _cloudBuildProgress.value = msg },
+                    onProgress = { msg ->
+                        _cloudBuildProgress.value = msg
+                        val fraction = when {
+                            msg.contains("pushing", ignoreCase = true) || msg.contains("commit", ignoreCase = true) -> 0.50f
+                            msg.contains("trigger", ignoreCase = true) || msg.contains("workflow", ignoreCase = true) -> 0.75f
+                            else -> 0.40f
+                        }
+                        BackgroundTaskManager.updateProgress(
+                            context = getApplication(),
+                            title = "Compiling ${latestProject.appName}",
+                            message = msg,
+                            progress = fraction
+                        )
+                    },
                     onConsoleLog = { entry -> appendConsoleEntry(entry) }
                 )
 
@@ -2138,6 +2682,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 _snackbarMessage.value = "Pushed to ${result.repoOwner}/${result.repoName} & triggered APK build!"
+                BackgroundTaskManager.finishTask(
+                    context = getApplication(),
+                    title = "Cloud APK Build Active",
+                    completionMessage = "Pushed to GitHub Actions! Building APK for ${latestProject.appName}."
+                )
             } catch (ex: Exception) {
                 val errMsg = gitHubRepository.buildErrorMessage(ex)
                 appendConsoleLog(
@@ -2146,6 +2695,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     message = "Cloud APK Build failed: $errMsg"
                 )
                 _errorDialogMessage.value = errMsg
+                BackgroundTaskManager.failTask(
+                    context = getApplication(),
+                    title = "Compiling ${project.appName}",
+                    errorMessage = errMsg
+                )
             } finally {
                 _isCloudBuildBusy.value = false
                 _cloudBuildProgress.value = null

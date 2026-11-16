@@ -5,7 +5,8 @@ import com.example.model.StudioSettings
 
 data class GenerationResult(
     val payload: GeneratedProjectPayload,
-    val modelUsed: String
+    val modelUsed: String,
+    val tokensUsed: Long? = null
 )
 
 interface CodeGeneratorDataSource {

@@ -26,8 +26,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.example.model.GenerationUiState
-import com.example.ui.components.SettingsBottomSheet
 import com.example.ui.screens.GeneratorScreen
+import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StarterTemplatesScreen
 import com.example.ui.screens.WorkspaceScreen
 import com.example.viewmodel.StudioViewModel
@@ -42,6 +42,9 @@ object StarterTemplatesRoute
 
 @Serializable
 data class WorkspaceRoute(val projectId: String)
+
+@Serializable
+object SettingsRoute
 
 @Composable
 fun AppNavGraph(
@@ -74,8 +77,11 @@ fun AppNavGraph(
     val snapshots by studioViewModel.projectSnapshots.collectAsStateWithLifecycle()
     val snackbarMessage by studioViewModel.snackbarMessage.collectAsStateWithLifecycle()
     val errorDialogMessage by studioViewModel.errorDialogMessage.collectAsStateWithLifecycle()
-
-    var showSettingsSheet by remember { mutableStateOf(false) }
+    val geminiVerificationState by studioViewModel.geminiVerificationState.collectAsStateWithLifecycle()
+    val openRouterVerificationState by studioViewModel.openRouterVerificationState.collectAsStateWithLifecycle()
+    val savedKeyHealthState by studioViewModel.savedKeyHealthState.collectAsStateWithLifecycle()
+    val apiUsageSummary by studioViewModel.apiUsageSummary.collectAsStateWithLifecycle()
+    val monthlyUsageAlertState by studioViewModel.monthlyUsageAlertState.collectAsStateWithLifecycle()
 
     LaunchedEffect(snackbarMessage) {
         val msg = snackbarMessage ?: return@LaunchedEffect
@@ -87,39 +93,6 @@ fun AppNavGraph(
         val success = generationState as? GenerationUiState.Success ?: return@LaunchedEffect
         studioViewModel.resetGenerationState()
         navController.navigate(WorkspaceRoute(success.projectId))
-    }
-
-    if (showSettingsSheet) {
-        SettingsBottomSheet(
-            settings = settings,
-            isImportingModel = isImportingModel,
-            bundledModelState = bundledModelState,
-            generatorConfig = generatorConfig,
-            hardwareProfile = deviceHardwareProfile,
-            localModelDownloadState = localModelDownloadState,
-            modelVerificationStates = modelVerificationStates,
-            onThemeModeChange = studioViewModel::updateThemeMode,
-            onEditorThemeModeChange = studioViewModel::updateEditorThemeMode,
-            onEngineModeChange = studioViewModel::updateEngineMode,
-            onImportModelUri = studioViewModel::importLocalModelFile,
-            onRestoreBuiltInModel = studioViewModel::restoreBuiltInBundledModel,
-            onReinitializeModel = studioViewModel::reinitializeLocalModel,
-            onDownloadBuiltInFromMirrors = studioViewModel::downloadBuiltInModelFromMirrors,
-            onCancelBuiltInMirrorDownload = studioViewModel::cancelBuiltInMirrorDownload,
-            onVerifyAllModelLinks = studioViewModel::verifyAllPresetModelLinks,
-            onVerifySingleModelLink = studioViewModel::verifyPresetModelLink,
-            onDownloadLocalModel = studioViewModel::downloadAndInitializeLocalModel,
-            onCancelLocalModelDownload = studioViewModel::cancelLocalModelDownload,
-            onDismissLocalModelDownloadError = studioViewModel::dismissLocalModelDownloadError,
-            onRefreshHardwareProfile = studioViewModel::refreshDeviceHardwareProfile,
-            onUpdateHuggingFaceToken = studioViewModel::updateHuggingFaceToken,
-            onUnloadLocalModel = studioViewModel::unloadAndDeleteLocalModel,
-            benchmarkState = modelBenchmarkState,
-            onTestModel = studioViewModel::testBundledModel,
-            onCancelTestModel = studioViewModel::cancelModelBenchmark,
-            onSaveSettings = studioViewModel::saveSettings,
-            onDismiss = { showSettingsSheet = false }
-        )
     }
 
     if (errorDialogMessage != null) {
@@ -163,6 +136,7 @@ fun AppNavGraph(
                         localModelDownloadState = localModelDownloadState,
                         bundledModelState = bundledModelState,
                         modelVerificationStates = modelVerificationStates,
+                        monthlyUsageAlert = monthlyUsageAlertState,
                         onEngineModeChange = studioViewModel::updateEngineMode,
                         onCloudModelChange = studioViewModel::updateCloudModel,
                         onImportLocalModelUri = studioViewModel::importLocalModelFile,
@@ -177,7 +151,10 @@ fun AppNavGraph(
                         onRefreshHardwareProfile = studioViewModel::refreshDeviceHardwareProfile,
                         onUpdateHuggingFaceToken = studioViewModel::updateHuggingFaceToken,
                         onUnloadLocalModel = studioViewModel::unloadAndDeleteLocalModel,
-                        onOpenSettings = { showSettingsSheet = true },
+                        onOpenSettings = {
+                            studioViewModel.resetCredentialVerification()
+                            navController.navigate(SettingsRoute)
+                        },
                         onOpenStarterTemplates = {
                             navController.navigate(StarterTemplatesRoute)
                         },
@@ -235,7 +212,10 @@ fun AppNavGraph(
                             studioViewModel.flushPendingAutoSave()
                             navController.popBackStack()
                         },
-                        onOpenSettings = { showSettingsSheet = true },
+                        onOpenSettings = {
+                            studioViewModel.resetCredentialVerification()
+                            navController.navigate(SettingsRoute)
+                        },
                         onSaveFile = studioViewModel::saveEditedFile,
                         onLivePreviewEdit = studioViewModel::updateFileInMemoryForPreview,
                         onFlushAutoSave = studioViewModel::flushPendingAutoSave,
@@ -273,6 +253,55 @@ fun AppNavGraph(
                         onShowToast = { message ->
                             scope.launch { snackbarHostState.showSnackbar(message) }
                         }
+                    )
+                }
+
+                composable<SettingsRoute> {
+                    SettingsScreen(
+                        settings = settings,
+                        isImportingModel = isImportingModel,
+                        bundledModelState = bundledModelState,
+                        generatorConfig = generatorConfig,
+                        hardwareProfile = deviceHardwareProfile,
+                        localModelDownloadState = localModelDownloadState,
+                        modelVerificationStates = modelVerificationStates,
+                        isHardwareKeystoreBacked = studioViewModel.isCredentialStorageHardwareBacked,
+                        geminiVerification = geminiVerificationState,
+                        openRouterVerification = openRouterVerificationState,
+                        savedKeyHealthState = savedKeyHealthState,
+                        apiUsageSummary = apiUsageSummary,
+                        monthlyUsageAlertState = monthlyUsageAlertState,
+                        onThemeModeChange = studioViewModel::updateThemeMode,
+                        onEditorThemeModeChange = studioViewModel::updateEditorThemeMode,
+                        onEngineModeChange = studioViewModel::updateEngineMode,
+                        onImportModelUri = studioViewModel::importLocalModelFile,
+                        onRestoreBuiltInModel = studioViewModel::restoreBuiltInBundledModel,
+                        onReinitializeModel = studioViewModel::reinitializeLocalModel,
+                        onDownloadBuiltInFromMirrors = studioViewModel::downloadBuiltInModelFromMirrors,
+                        onCancelBuiltInMirrorDownload = studioViewModel::cancelBuiltInMirrorDownload,
+                        onVerifyAllModelLinks = studioViewModel::verifyAllPresetModelLinks,
+                        onVerifySingleModelLink = studioViewModel::verifyPresetModelLink,
+                        onDownloadLocalModel = studioViewModel::downloadAndInitializeLocalModel,
+                        onCancelLocalModelDownload = studioViewModel::cancelLocalModelDownload,
+                        onDismissLocalModelDownloadError = studioViewModel::dismissLocalModelDownloadError,
+                        onRefreshHardwareProfile = studioViewModel::refreshDeviceHardwareProfile,
+                        onUpdateHuggingFaceToken = studioViewModel::updateHuggingFaceToken,
+                        onUnloadLocalModel = studioViewModel::unloadAndDeleteLocalModel,
+                        benchmarkState = modelBenchmarkState,
+                        onTestModel = studioViewModel::testBundledModel,
+                        onCancelTestModel = studioViewModel::cancelModelBenchmark,
+                        onVerifyGeminiKey = studioViewModel::verifyGeminiApiKey,
+                        onVerifyOpenRouterKey = studioViewModel::verifyOpenRouterApiKey,
+                        onVerifySavedKey = { studioViewModel.verifySavedProviderCredentials() },
+                        onResetUsageStats = studioViewModel::resetApiUsageStats,
+                        onApplyMonthlyThreshold = studioViewModel::updateMonthlyUsageThreshold,
+                        onSaveCloudCredentials = studioViewModel::saveCloudCredentials,
+                        onClearGeminiKey = studioViewModel::clearGeminiApiKey,
+                        onClearOpenRouterKey = studioViewModel::clearOpenRouterApiKey,
+                        onClearAllCloudCredentials = studioViewModel::clearAllCloudCredentials,
+                        onSaveSettings = studioViewModel::saveSettings,
+                        onBack = { navController.popBackStack() },
+                        isModalDialog = false
                     )
                 }
             }

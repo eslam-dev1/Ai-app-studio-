@@ -24,6 +24,12 @@ enum class EditorThemeMode(val label: String, val subtitle: String) {
     GLACIER_DAY("Glacier Day", "Clean white background with crisp high-contrast syntax")
 }
 
+@Serializable
+enum class ApiUsageLimitMetric(val label: String, val unitLabel: String) {
+    REQUESTS("Requests", "requests"),
+    TOKENS("Tokens", "tokens")
+}
+
 object OpenRouterModels {
     const val GEMINI_20_FLASH_FREE = "google/gemini-2.0-flash-exp:free"
     const val GEMINI_25_PRO_FREE = "google/gemini-2.5-pro-exp-03-25:free"
@@ -121,11 +127,25 @@ data class StudioSettings(
     val gitHubPat: String = "",
     val gitHubUsername: String = "",
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
-    val editorThemeMode: EditorThemeMode = EditorThemeMode.CYBER_NIGHT
+    val editorThemeMode: EditorThemeMode = EditorThemeMode.CYBER_NIGHT,
+    val monthlyUsageAlertEnabled: Boolean = true,
+    val monthlyUsageLimitMetric: ApiUsageLimitMetric = ApiUsageLimitMetric.REQUESTS,
+    val monthlyUsageLimit: Long = DEFAULT_MONTHLY_REQUEST_LIMIT,
+    val monthlyUsageWarningThresholdPercent: Int = DEFAULT_WARNING_THRESHOLD_PERCENT
 ) {
     companion object {
         const val DEFAULT_HUGGING_FACE_TOKEN = "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"
+        const val DEFAULT_MONTHLY_REQUEST_LIMIT = 100L
+        const val DEFAULT_MONTHLY_TOKEN_LIMIT = 100_000L
+        const val DEFAULT_WARNING_THRESHOLD_PERCENT = 80
     }
+}
+
+enum class BuildPhase(val label: String, val nodeIndex: Int) {
+    PROMPTING("Preparing", 0),
+    GENERATING_CODE("Generating Code", 1),
+    PARSING_FILES("Writing Files", 2),
+    PACKAGING_APK("Packaging APK", 2)
 }
 
 sealed interface GenerationUiState {
@@ -134,7 +154,12 @@ sealed interface GenerationUiState {
         val stepIndex: Int,
         val stepMessage: String,
         val engineLabel: String,
-        val streamingPreview: String = ""
+        val streamingPreview: String = "",
+        val buildPhase: BuildPhase = BuildPhase.PROMPTING,
+        val progress: Float = 0.08f,
+        val charsReceived: Int = 0,
+        val tokensReceived: Int = 0,
+        val activeFileLabel: String? = null
     ) : GenerationUiState
     data class Success(val projectId: String, val appName: String) : GenerationUiState
     data class Error(val message: String) : GenerationUiState

@@ -11,6 +11,29 @@ enum class LocalModelTier(val tierLabel: String, val shortTierName: String) {
     TIER_3_PRO("Tier 3 — Pro / High Accuracy", "Pro Tier")
 }
 
+enum class LocalModelSpecialty(val label: String) {
+    ALL("All Models"),
+    BEST_FIT("Best for RAM"),
+    CODING("Kotlin & Code"),
+    REASONING("Reasoning"),
+    TOOL_CALLING("JSON & Actions"),
+    ULTRA_LITE("Ultra-Lite")
+}
+
+data class LocalAiTip(
+    val id: String,
+    val title: String,
+    val detail: String
+)
+
+data class LocalAiSuggestionsReport(
+    val filteredModels: List<LocalModelPreset>,
+    val topPick: LocalModelPreset,
+    val codingPick: LocalModelPreset,
+    val fastPick: LocalModelPreset,
+    val tips: List<LocalAiTip>
+)
+
 data class LocalModelPreset(
     val id: String,
     val tier: LocalModelTier,
@@ -26,7 +49,10 @@ data class LocalModelPreset(
     val downloadUrl: String,
     val fileName: String,
     val isGated: Boolean = false,
-    val preferredVariantHint: String = ""
+    val preferredVariantHint: String = "",
+    val specialty: LocalModelSpecialty = LocalModelSpecialty.CODING,
+    val bestForSummary: String = "",
+    val contextWindowHint: String = "1.2K–2K ctx"
 )
 
 data class DeviceHardwareProfile(
@@ -62,7 +88,9 @@ object LocalModelCatalog {
             downloadUrl = "https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1b-it-int4.task",
             fileName = "gemma3-1b-it-int4.task",
             isGated = true,
-            preferredVariantHint = "int4"
+            preferredVariantHint = "int4",
+            specialty = LocalModelSpecialty.ULTRA_LITE,
+            bestForSummary = "Fast Int4 Google Gemma for compact Compose screens & quick edits"
         ),
         LocalModelPreset(
             id = "gemma2_2b_it_gpu_int4",
@@ -79,7 +107,9 @@ object LocalModelCatalog {
             downloadUrl = "https://huggingface.co/litert-community/Gemma2-2B-IT/resolve/main/Gemma2-2B-IT_multi-prefill-seq_q8_ekv1280.task",
             fileName = "gemma2-2b-it-gpu-int4.task",
             isGated = true,
-            preferredVariantHint = "int4"
+            preferredVariantHint = "int4",
+            specialty = LocalModelSpecialty.REASONING,
+            bestForSummary = "GPU-accelerated balanced generation for mid-range phones"
         ),
         LocalModelPreset(
             id = "gemma2_2b_it_gpu_int8",
@@ -96,7 +126,9 @@ object LocalModelCatalog {
             downloadUrl = "https://huggingface.co/litert-community/Gemma2-2B-IT/resolve/main/Gemma2-2B-IT_multi-prefill-seq_q8_ekv1280.task",
             fileName = "Gemma2-2B-IT_multi-prefill-seq_q8_ekv1280.task",
             isGated = true,
-            preferredVariantHint = "q8"
+            preferredVariantHint = "q8",
+            specialty = LocalModelSpecialty.REASONING,
+            bestForSummary = "Higher-precision Q8 Gemma 2 for cleaner structured JSON & UI code"
         ),
         LocalModelPreset(
             id = "model1_ultra_lite",
@@ -111,7 +143,9 @@ object LocalModelCatalog {
             badge = "Tiny • Fastest on Low RAM",
             repoId = "litert-community/SmolLM2-360M-Instruct",
             downloadUrl = "https://huggingface.co/litert-community/SmolLM2-360M-Instruct/resolve/main/SmolLM2-360M-Instruct_multi-prefill-seq_q8_ekv1280.task",
-            fileName = "SmolLM2-360M-Instruct_multi-prefill-seq_q8_ekv1280.task"
+            fileName = "SmolLM2-360M-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.ULTRA_LITE,
+            bestForSummary = "Minimal memory footprint for 3GB–4GB devices & rapid drafts"
         ),
         LocalModelPreset(
             id = "model2_lite_fast",
@@ -126,7 +160,9 @@ object LocalModelCatalog {
             badge = "Balanced Lite • No Auth",
             repoId = "litert-community/SmolLM2-1.7B-Instruct",
             downloadUrl = "https://huggingface.co/litert-community/SmolLM2-1.7B-Instruct/resolve/main/SmolLM2-1.7B-Instruct_multi-prefill-seq_q8_ekv1280.task",
-            fileName = "SmolLM2-1.7B-Instruct_multi-prefill-seq_q8_ekv1280.task"
+            fileName = "SmolLM2-1.7B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.ULTRA_LITE,
+            bestForSummary = "No-login balanced assistant for 4GB–6GB everyday coding"
         ),
         LocalModelPreset(
             id = "model3_micro_coder",
@@ -141,7 +177,9 @@ object LocalModelCatalog {
             badge = "Ultra Fast • Low Memory",
             repoId = "litert-community/Qwen2.5-0.5B-Instruct",
             downloadUrl = "https://huggingface.co/litert-community/Qwen2.5-0.5B-Instruct/resolve/main/Qwen2.5-0.5B-Instruct_multi-prefill-seq_q8_ekv1280.task",
-            fileName = "Qwen2.5-0.5B-Instruct_multi-prefill-seq_q8_ekv1280.task"
+            fileName = "Qwen2.5-0.5B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.CODING,
+            bestForSummary = "Very fast Kotlin starter code generation under tight RAM"
         ),
         LocalModelPreset(
             id = "model4_balanced_coder",
@@ -156,7 +194,9 @@ object LocalModelCatalog {
             badge = "Best for Kotlin Code",
             repoId = "litert-community/Qwen2.5-1.5B-Instruct",
             downloadUrl = "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task",
-            fileName = "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task"
+            fileName = "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.CODING,
+            bestForSummary = "Reliable Compose + ViewModel code generation on 6GB–8GB devices"
         ),
         LocalModelPreset(
             id = "model5_reasoning",
@@ -171,7 +211,9 @@ object LocalModelCatalog {
             badge = "Step-by-Step Logic",
             repoId = "litert-community/DeepSeek-R1-Distill-Qwen-1.5B",
             downloadUrl = "https://huggingface.co/litert-community/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B_multi-prefill-seq_q8_ekv1280.task",
-            fileName = "DeepSeek-R1-Distill-Qwen-1.5B_multi-prefill-seq_q8_ekv1280.task"
+            fileName = "DeepSeek-R1-Distill-Qwen-1.5B_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.REASONING,
+            bestForSummary = "Strong chain-of-thought reasoning for complex business logic"
         ),
         LocalModelPreset(
             id = "model6_medium_pro",
@@ -186,7 +228,9 @@ object LocalModelCatalog {
             badge = "Pro Code Quality",
             repoId = "litert-community/Qwen2.5-3B-Instruct",
             downloadUrl = "https://huggingface.co/litert-community/Qwen2.5-3B-Instruct/resolve/main/Qwen2.5-3B-Instruct_multi-prefill-seq_q8_ekv1280.task",
-            fileName = "Qwen2.5-3B-Instruct_multi-prefill-seq_q8_ekv1280.task"
+            fileName = "Qwen2.5-3B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.CODING,
+            bestForSummary = "High-accuracy multi-file Kotlin/Compose synthesis on 8GB+ phones"
         ),
         LocalModelPreset(
             id = "model7_flagship",
@@ -201,9 +245,159 @@ object LocalModelCatalog {
             badge = "High Accuracy • Microsoft",
             repoId = "litert-community/Phi-4-mini-instruct",
             downloadUrl = "https://huggingface.co/litert-community/Phi-4-mini-instruct/resolve/main/Phi-4-mini-instruct_multi-prefill-seq_q8_ekv1280.task",
-            fileName = "Phi-4-mini-instruct_multi-prefill-seq_q8_ekv1280.task"
+            fileName = "Phi-4-mini-instruct_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.REASONING,
+            bestForSummary = "Microsoft Phi-4 dense reasoning for clean architecture & refactoring"
         )
     )
+
+    val extendedSuggestions: List<LocalModelPreset> = listOf(
+        LocalModelPreset(
+            id = "qwen25_coder_15b",
+            tier = LocalModelTier.TIER_2_BALANCED,
+            tierTitle = "Suggested Coder — Kotlin Specialized",
+            displayName = "Qwen 2.5 Coder 1.5B Instruct",
+            targetRamHint = "6GB–8GB RAM",
+            approxSizeLabel = "~1.5 GB",
+            approxSizeBytes = 1500L * 1024L * 1024L,
+            minRecommendedTotalRamGb = 5.5,
+            minRecommendedFreeRamGb = 1.8,
+            badge = "Dedicated Code Weights",
+            repoId = "litert-community/Qwen2.5-Coder-1.5B-Instruct",
+            downloadUrl = "https://huggingface.co/litert-community/Qwen2.5-Coder-1.5B-Instruct/resolve/main/Qwen2.5-Coder-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            fileName = "Qwen2.5-Coder-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.CODING,
+            bestForSummary = "Specialized coding weights for Jetpack Compose UI & Kotlin fixes"
+        ),
+        LocalModelPreset(
+            id = "qwen25_coder_3b",
+            tier = LocalModelTier.TIER_3_PRO,
+            tierTitle = "Suggested Pro Coder — Flagship Code",
+            displayName = "Qwen 2.5 Coder 3B Instruct",
+            targetRamHint = "8GB–12GB+ RAM",
+            approxSizeLabel = "~3.0 GB",
+            approxSizeBytes = 3000L * 1024L * 1024L,
+            minRecommendedTotalRamGb = 7.5,
+            minRecommendedFreeRamGb = 3.1,
+            badge = "Top Kotlin Architecture",
+            repoId = "litert-community/Qwen2.5-Coder-3B-Instruct",
+            downloadUrl = "https://huggingface.co/litert-community/Qwen2.5-Coder-3B-Instruct/resolve/main/Qwen2.5-Coder-3B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            fileName = "Qwen2.5-Coder-3B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.CODING,
+            bestForSummary = "Multi-file ViewModel + Repository + Material 3 generation offline"
+        ),
+        LocalModelPreset(
+            id = "qwen3_06b",
+            tier = LocalModelTier.TIER_1_LITE,
+            tierTitle = "Suggested Next-Gen — Nano Fast",
+            displayName = "Qwen 3 0.6B (LiteRT)",
+            targetRamHint = "3GB–4GB RAM",
+            approxSizeLabel = "~580 MB",
+            approxSizeBytes = 580L * 1024L * 1024L,
+            minRecommendedTotalRamGb = 3.0,
+            minRecommendedFreeRamGb = 0.9,
+            badge = "Next-Gen Qwen3 • Fast",
+            repoId = "litert-community/Qwen3-0.6B",
+            downloadUrl = "https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B_multi-prefill-seq_q8_ekv1280.task",
+            fileName = "Qwen3-0.6B_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.ULTRA_LITE,
+            bestForSummary = "Low-latency Qwen3 generation with minimal battery & RAM usage"
+        ),
+        LocalModelPreset(
+            id = "qwen3_17b",
+            tier = LocalModelTier.TIER_2_BALANCED,
+            tierTitle = "Suggested Next-Gen — Hybrid Thinking",
+            displayName = "Qwen 3 1.7B (Thinking & Code)",
+            targetRamHint = "6GB–8GB RAM",
+            approxSizeLabel = "~1.7 GB",
+            approxSizeBytes = 1700L * 1024L * 1024L,
+            minRecommendedTotalRamGb = 5.5,
+            minRecommendedFreeRamGb = 1.9,
+            badge = "Hybrid Thinking • No Auth",
+            repoId = "litert-community/Qwen3-1.7B",
+            downloadUrl = "https://huggingface.co/litert-community/Qwen3-1.7B/resolve/main/Qwen3-1.7B_multi-prefill-seq_q8_ekv1280.task",
+            fileName = "Qwen3-1.7B_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.REASONING,
+            bestForSummary = "Next-gen Qwen3 reasoning & structured JSON project planning"
+        ),
+        LocalModelPreset(
+            id = "hammer21_15b",
+            tier = LocalModelTier.TIER_2_BALANCED,
+            tierTitle = "Suggested Agent — Tool & JSON",
+            displayName = "Hammer 2.1 1.5B (Action & JSON)",
+            targetRamHint = "6GB–8GB RAM",
+            approxSizeLabel = "~1.6 GB",
+            approxSizeBytes = 1600L * 1024L * 1024L,
+            minRecommendedTotalRamGb = 5.5,
+            minRecommendedFreeRamGb = 1.8,
+            badge = "Strict JSON & Tool Calls",
+            repoId = "litert-community/Hammer2.1-1.5b",
+            downloadUrl = "https://huggingface.co/litert-community/Hammer2.1-1.5b/resolve/main/Hammer2.1-1.5b_multi-prefill-seq_q8_ekv1280.task",
+            fileName = "Hammer2.1-1.5b_multi-prefill-seq_q8_ekv1280.task",
+            specialty = LocalModelSpecialty.TOOL_CALLING,
+            bestForSummary = "Trained for reliable JSON project bundles & API tool schemas"
+        ),
+        LocalModelPreset(
+            id = "llama32_1b_instruct",
+            tier = LocalModelTier.TIER_1_LITE,
+            tierTitle = "Suggested Meta — Mobile Lite",
+            displayName = "Llama 3.2 1B Instruct (Meta)",
+            targetRamHint = "4GB–6GB RAM",
+            approxSizeLabel = "~1.1 GB",
+            approxSizeBytes = 1100L * 1024L * 1024L,
+            minRecommendedTotalRamGb = 4.0,
+            minRecommendedFreeRamGb = 1.3,
+            badge = "Meta Open Weights • Lite",
+            repoId = "litert-community/Llama-3.2-1B-Instruct",
+            downloadUrl = "https://huggingface.co/litert-community/Llama-3.2-1B-Instruct/resolve/main/Llama-3.2-1B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            fileName = "Llama-3.2-1B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            isGated = true,
+            preferredVariantHint = "q8",
+            specialty = LocalModelSpecialty.ULTRA_LITE,
+            bestForSummary = "Compact Meta Llama for fast instruction following (HF license)"
+        ),
+        LocalModelPreset(
+            id = "llama32_3b_instruct",
+            tier = LocalModelTier.TIER_3_PRO,
+            tierTitle = "Suggested Meta — Flagship 3B",
+            displayName = "Llama 3.2 3B Instruct (Meta Pro)",
+            targetRamHint = "8GB–12GB+ RAM",
+            approxSizeLabel = "~2.9 GB",
+            approxSizeBytes = 2900L * 1024L * 1024L,
+            minRecommendedTotalRamGb = 7.5,
+            minRecommendedFreeRamGb = 3.0,
+            badge = "Meta Pro • HF License",
+            repoId = "litert-community/Llama-3.2-3B-Instruct",
+            downloadUrl = "https://huggingface.co/litert-community/Llama-3.2-3B-Instruct/resolve/main/Llama-3.2-3B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            fileName = "Llama-3.2-3B-Instruct_multi-prefill-seq_q8_ekv1280.task",
+            isGated = true,
+            preferredVariantHint = "int4",
+            specialty = LocalModelSpecialty.REASONING,
+            bestForSummary = "Strong multi-screen reasoning & prose on 8GB–12GB+ phones"
+        ),
+        LocalModelPreset(
+            id = "gemma3_270m_it",
+            tier = LocalModelTier.TIER_1_LITE,
+            tierTitle = "Suggested Google — Nano Speed",
+            displayName = "Gemma 3 270M IT (Nano)",
+            targetRamHint = "3GB+ RAM",
+            approxSizeLabel = "~290 MB",
+            approxSizeBytes = 290L * 1024L * 1024L,
+            minRecommendedTotalRamGb = 2.5,
+            minRecommendedFreeRamGb = 0.6,
+            badge = "Smallest Gemma • Instant",
+            repoId = "litert-community/gemma-3-270m-it",
+            downloadUrl = "https://huggingface.co/litert-community/gemma-3-270m-it/resolve/main/gemma3-270m-it-q8.task",
+            fileName = "gemma3-270m-it-q8.task",
+            isGated = true,
+            preferredVariantHint = "q8",
+            specialty = LocalModelSpecialty.ULTRA_LITE,
+            bestForSummary = "Ultra-compact official Google Gemma for 3GB phones & fast snippets"
+        )
+    )
+
+    val allPresets: List<LocalModelPreset>
+        get() = presets + extendedSuggestions
 
     fun presetForTier(tier: LocalModelTier): LocalModelPreset = when (tier) {
         LocalModelTier.TIER_1_LITE -> presets.first { it.id == "model2_lite_fast" }
@@ -223,7 +417,67 @@ object LocalModelCatalog {
     }
 
     fun findById(id: String): LocalModelPreset? =
-        presets.firstOrNull { it.id == id }
+        allPresets.firstOrNull { it.id == id }
+
+    fun isSafeForDevice(profile: DeviceHardwareProfile, preset: LocalModelPreset): Boolean {
+        return profile.totalRamGb >= preset.minRecommendedTotalRamGb &&
+            profile.availableRamGb >= preset.minRecommendedFreeRamGb &&
+            (!profile.isLowMemory || preset.tier == LocalModelTier.TIER_1_LITE)
+    }
+
+    fun buildSuggestionsForProfile(
+        profile: DeviceHardwareProfile,
+        specialty: LocalModelSpecialty = LocalModelSpecialty.ALL
+    ): LocalAiSuggestionsReport {
+        val catalog = allPresets
+        val filtered = when (specialty) {
+            LocalModelSpecialty.ALL -> catalog
+            LocalModelSpecialty.BEST_FIT -> catalog.filter { isSafeForDevice(profile, it) }
+                .ifEmpty { catalog.filter { it.tier == LocalModelTier.TIER_1_LITE } }
+            else -> catalog.filter { it.specialty == specialty }
+        }
+
+        val topPick = recommendPreset(profile)
+        val codingPick = catalog.lastOrNull {
+            it.specialty == LocalModelSpecialty.CODING && isSafeForDevice(profile, it)
+        } ?: catalog.first { it.id == "model3_micro_coder" }
+
+        val fastPick = catalog.firstOrNull {
+            it.id == "qwen3_06b" && isSafeForDevice(profile, it)
+        } ?: catalog.first { it.id == "model1_ultra_lite" }
+
+        val totalRamStr = String.format(Locale.US, "%.1f GB", profile.totalRamGb)
+        val tips = listOf(
+            LocalAiTip(
+                id = "ram_headroom",
+                title = "RAM Headroom Rule (1.8× Model Size)",
+                detail = "Your device has $totalRamStr total RAM (${profile.recommendedTier.shortTierName}). Keep ~1.8× the model file size free for KV cache so MediaPipe avoids OOM crashes."
+            ),
+            LocalAiTip(
+                id = "quantization_choice",
+                title = "Int4 Speed vs Q8 Kotlin Precision",
+                detail = "Choose Int4 (.task) models when RAM is tight (<6 GB free) for lower memory load; pick Q8 models like Qwen 2.5 Coder for stricter JSON & Compose syntax."
+            ),
+            LocalAiTip(
+                id = "termux_gguf",
+                title = "Need 7B–14B Coding Models Offline?",
+                detail = "Switch engine to Termux / Local Server (127.0.0.1:11434/v1) and run Ollama or llama.cpp with qwen2.5-coder:7b GGUF outside MediaPipe's .task limit."
+            ),
+            LocalAiTip(
+                id = "json_reliability",
+                title = "JSON & Multi-File Stability",
+                detail = "Hammer 2.1 1.5B, Qwen 2.5 Coder, and Qwen 3 1.7B handle structured JSON project outputs best. Pair large prompts with Temperature 0.15."
+            )
+        )
+
+        return LocalAiSuggestionsReport(
+            filteredModels = filtered,
+            topPick = topPick,
+            codingPick = codingPick,
+            fastPick = fastPick,
+            tips = tips
+        )
+    }
 }
 
 object DeviceHardwareProfiler {
