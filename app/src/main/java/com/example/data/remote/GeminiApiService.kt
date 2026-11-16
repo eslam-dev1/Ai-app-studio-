@@ -3,7 +3,9 @@ package com.example.data.remote
 import com.example.data.generator.AppGenerationPrompt
 import com.example.data.preferences.ApiKeyVerificationStatus
 import com.example.data.preferences.ApiUsageHeaderParser
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -14,8 +16,11 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.BufferedReader
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class GeminiApiException(
     val statusCode: Int,
@@ -34,6 +39,7 @@ data class GeminiGenerateResult(
 /**
  * Official Google Generative Language REST API Client for Google Gemini.
  * Direct endpoint: POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}
+ * Streaming endpoint: POST https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}
  * Verification endpoint: GET https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key={GEMINI_API_KEY}
  */
 object GeminiApiService {
@@ -60,7 +66,7 @@ object GeminiApiService {
             .followRedirects(true)
             .followSslRedirects(true)
             .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.MINUTES)
             .writeTimeout(30, TimeUnit.SECONDS)
             .build()
     }
@@ -130,17 +136,16 @@ object GeminiApiService {
                 }
             }
         }.getOrElse { err ->
-            val latency = (System.currentTimeMillis() - startedAt).coerceAtLeast(1L)
             ApiKeyVerificationStatus.Invalid(
                 errorMessage = "🔴 Gemini: Network Error • ${err.localizedMessage ?: "Check Internet connection"}",
-                latencyMs = latency
+                latencyMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(1L)
             )
         }
     }
 
     /**
-     * Executes real code generation via Google Generative Language REST API:
-     * POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}
+     * Executes code generation through Google's streaming REST endpoint and emits accumulated
+     * text as chunks arrive. Cancelling the coroutine cancels the underlying HTTP call.
      */
     suspend fun generateContent(
         apiKey: String,
@@ -151,68 +156,116 @@ object GeminiApiService {
         maxOutputTokens: Int = 8192,
         onTokenChunk: ((String) -> Unit)? = null,
         httpClient: OkHttpClient = client
-    ): GeminiGenerateResult = withContext(Dispatchers.IO) {
+    ): GeminiGenerateResult {
         val cleanKey = apiKey.trim()
         if (cleanKey.isBlank()) {
             throw GeminiApiException(401, "Google Gemini API key is missing. Configure it in Credentials tab.")
         }
 
+        val targetModel = if (model.startsWith("gemini-")) model else MODEL_FLASH_25
         val requestPayload = buildRequestJson(
             prompt = prompt,
             systemInstruction = systemInstruction,
             temperature = temperature,
             maxOutputTokens = maxOutputTokens
         )
-
-        val targetModel = if (model.startsWith("gemini-")) model else MODEL_FLASH_25
-        val endpointUrl = "https://generativelanguage.googleapis.com/v1beta/models/$targetModel:generateContent?key=$cleanKey"
+        val endpointUrl = okhttp3.HttpUrl.Builder()
+            .scheme("https")
+            .host("generativelanguage.googleapis.com")
+            .addPathSegments("v1beta/models/$targetModel:streamGenerateContent")
+            .addQueryParameter("alt", "sse")
+            .addQueryParameter("key", cleanKey)
+            .build()
 
         val request = Request.Builder()
             .url(endpointUrl)
+            .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json")
             .header("User-Agent", "AIAppStudio-Android/1.0")
             .post(requestPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
+        val call = httpClient.newCall(request)
 
-        try {
-            httpClient.newCall(request).execute().use { response ->
-                val bodyString = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    val errorMsg = parseErrorMessage(bodyString) ?: "HTTP ${response.code}"
-                    when (response.code) {
-                        400, 403 -> throw GeminiApiException(
-                            statusCode = response.code,
-                            message = "Gemini API rejected request ($errorMsg). Ensure your key is from aistudio.google.com/apikey."
-                        )
-                        429 -> throw GeminiApiException(
-                            statusCode = 429,
-                            message = "Gemini Quota Exceeded (HTTP 429). Daily rate limit reached in Google AI Studio."
-                        )
-                        else -> throw GeminiApiException(
-                            statusCode = response.code,
-                            message = "Gemini API failed with HTTP ${response.code}: $errorMsg"
+        return suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: IOException) {
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(
+                            GeminiApiException(500, "Failed to connect to Google Gemini API: ${e.localizedMessage ?: "Unknown error"}", e)
                         )
                     }
                 }
 
-                val generatedText = parseCandidatesText(bodyString)
-                if (generatedText.isBlank()) {
-                    throw GeminiApiException(200, "Gemini returned an empty candidate response for model $targetModel.")
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    try {
+                        response.use { httpResponse ->
+                            val body = httpResponse.body
+                            if (!httpResponse.isSuccessful) {
+                                val bodyString = body?.string().orEmpty()
+                                val errorMsg = parseErrorMessage(bodyString) ?: "HTTP ${httpResponse.code}"
+                                val message = when (httpResponse.code) {
+                                    400, 403 -> "Gemini API rejected request ($errorMsg). Ensure your key is from aistudio.google.com/apikey."
+                                    429 -> "Gemini Quota Exceeded (HTTP 429). Daily rate limit reached in Google AI Studio."
+                                    else -> "Gemini API failed with HTTP ${httpResponse.code}: $errorMsg"
+                                }
+                                throw GeminiApiException(httpResponse.code, message)
+                            }
+                            val source = body?.source()
+                                ?: throw GeminiApiException(500, "Gemini returned an empty response body.")
+                            val accumulated = StringBuilder()
+                            var tokensUsed: Long? = null
+                            val reader: BufferedReader = source.inputStream().bufferedReader(Charsets.UTF_8)
+                            reader.use { bufferedReader ->
+                                while (true) {
+                                    if (!continuation.isActive) {
+                                        call.cancel()
+                                        throw CancellationException("Gemini generation was cancelled.")
+                                    }
+                                    val line = bufferedReader.readLine() ?: break
+                                    if (!line.startsWith("data:")) continue
+                                    val data = line.removePrefix("data:").trim()
+                                    if (data.isEmpty() || data == "[DONE]") continue
+                                    val text = parseCandidatesText(data)
+                                    if (text.isNotEmpty()) {
+                                        accumulated.append(text)
+                                        onTokenChunk?.invoke(accumulated.toString())
+                                    }
+                                    parseTotalTokenCount(data)?.let { tokensUsed = it }
+                                    parseErrorMessage(data)?.let { errorMessage ->
+                                        throw GeminiApiException(httpResponse.code, errorMessage)
+                                    }
+                                }
+                            }
+
+                            val generatedText = accumulated.toString()
+                            if (generatedText.isBlank()) {
+                                throw GeminiApiException(200, "Gemini returned an empty candidate response for model $targetModel.")
+                            }
+                            if (continuation.isActive) {
+                                continuation.resume(
+                                    GeminiGenerateResult(
+                                        text = generatedText,
+                                        model = targetModel,
+                                        tokensUsed = tokensUsed,
+                                        httpStatusCode = httpResponse.code
+                                    )
+                                )
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        if (continuation.isActive) {
+                            continuation.resumeWithException(
+                                when (t) {
+                                    is CancellationException -> t
+                                    is GeminiApiException -> t
+                                    else -> GeminiApiException(500, "Failed to read Gemini response: ${t.localizedMessage ?: "Unknown error"}", t)
+                                }
+                            )
+                        }
+                    }
                 }
-
-                val tokensUsed = parseTotalTokenCount(bodyString)
-                onTokenChunk?.invoke(generatedText)
-
-                GeminiGenerateResult(
-                    text = generatedText,
-                    model = targetModel,
-                    tokensUsed = tokensUsed,
-                    httpStatusCode = response.code
-                )
-            }
-        } catch (t: Throwable) {
-            if (t is GeminiApiException) throw t
-            throw GeminiApiException(500, "Failed to connect to Google Gemini API: ${t.localizedMessage ?: "Unknown error"}", t)
+            })
         }
     }
 
@@ -262,7 +315,7 @@ object GeminiApiService {
         val firstCandidate = candidates.firstOrNull()?.jsonObject ?: return ""
         val content = firstCandidate["content"]?.jsonObject ?: return ""
         val parts = content["parts"]?.jsonArray ?: return ""
-        parts.joinToString("\n") { it.jsonObject["text"]?.jsonPrimitive?.content.orEmpty() }
+        parts.joinToString("") { it.jsonObject["text"]?.jsonPrimitive?.content.orEmpty() }
     }.getOrDefault("")
 
     private fun parseTotalTokenCount(bodyString: String): Long? = runCatching {
