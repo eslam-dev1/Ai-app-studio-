@@ -2,6 +2,8 @@ package com.example.data.generator
 
 import com.example.data.remote.ChatCompletionRequest
 import com.example.data.remote.ChatMessage
+import com.example.data.remote.GeminiApiException
+import com.example.data.remote.GeminiApiService
 import com.example.data.remote.OpenAiChatApi
 import com.example.data.remote.OpenAiHttpStatusException
 import com.example.data.remote.OpenAiSseClient
@@ -48,15 +50,6 @@ class OpenRouterGenerator : CodeGeneratorDataSource {
             .create(OpenAiChatApi::class.java)
     }
 
-    private val googleGeminiApi: OpenAiChatApi by lazy {
-        Retrofit.Builder()
-            .baseUrl("https://generativelanguage.googleapis.com/v1beta/openai/")
-            .client(httpClient)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-            .create(OpenAiChatApi::class.java)
-    }
-
     override suspend fun generateApp(
         prompt: String,
         settings: StudioSettings,
@@ -91,49 +84,31 @@ class OpenRouterGenerator : CodeGeneratorDataSource {
         )
 
         if (rawGeminiKey.isNotBlank() && wantsGeminiFirst) {
-            for ((idx, geminiModel) in OpenRouterModels.directGeminiFallbackChain.withIndex()) {
+            val candidateQueue = ArrayDeque(OpenRouterModels.directGeminiFallbackChain)
+            val attemptedModels = mutableSetOf<String>()
+            var discoveredModelsLoaded = false
+
+            while (candidateQueue.isNotEmpty()) {
+                val geminiModel = candidateQueue.removeFirst()
+                if (!attemptedModels.add(geminiModel)) continue
+
                 try {
-                    if (idx == 0) {
+                    if (attemptedModels.size == 1) {
                         onProgress(1, "Streaming Kotlin & Compose code ($geminiModel)…")
                     } else {
-                        onProgress(1, "Limit reached — switching to $geminiModel…")
+                        onProgress(1, "Switching to next valid model ($geminiModel)…")
                     }
 
-                    val streamed = runCatching {
-                        OpenAiSseClient.streamChatCompletion(
-                            client = httpClient,
-                            endpointUrl = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-                            model = geminiModel,
-                            messages = systemAndUserMessages,
-                            temperature = 0.25,
-                            maxTokens = 8192,
-                            authorization = "Bearer $rawGeminiKey",
-                            onTokenChunk = onStreamPreview
-                        )
-                    }.getOrElse { sseErr ->
-                        if (sseErr is CancellationException) throw sseErr
-                        if (sseErr is OpenAiHttpStatusException && sseErr.statusCode in setOf(401, 403, 429)) {
-                            throw sseErr
-                        }
-                        val fallbackResp = googleGeminiApi.createChatCompletion(
-                            authorization = "Bearer $rawGeminiKey",
-                            referer = null,
-                            title = null,
-                            request = ChatCompletionRequest(
-                                model = geminiModel,
-                                messages = systemAndUserMessages
-                            )
-                        )
-                        val text = fallbackResp.choices.firstOrNull()?.message?.content.orEmpty()
-                        if (text.isNotBlank()) onStreamPreview(text)
-                        com.example.data.remote.StreamCompletionOutput(
-                            content = text,
-                            modelUsed = fallbackResp.model,
-                            tokensUsed = fallbackResp.usage?.totalTokens?.takeIf { it > 0L }
-                        )
-                    }
+                    val geminiResult = GeminiApiService.generateContent(
+                        apiKey = rawGeminiKey,
+                        prompt = AppGenerationPrompt.buildUserMessage(prompt),
+                        model = geminiModel,
+                        systemInstruction = AppGenerationPrompt.SYSTEM_PROMPT,
+                        onTokenChunk = onStreamPreview,
+                        httpClient = httpClient
+                    )
 
-                    val rawContent = streamed.content
+                    val rawContent = geminiResult.text
                     if (rawContent.isBlank()) {
                         throw IllegalStateException("Gemini returned an empty response for $geminiModel.")
                     }
@@ -142,23 +117,31 @@ class OpenRouterGenerator : CodeGeneratorDataSource {
                     val payload = JsonProjectExtractor.extract(rawContent)
                     return@withContext GenerationResult(
                         payload = payload,
-                        modelUsed = "Gemini Free ($geminiModel)",
-                        tokensUsed = streamed.tokensUsed
+                        modelUsed = "Gemini Free (${geminiResult.model})",
+                        tokensUsed = geminiResult.tokensUsed
                     )
                 } catch (ce: CancellationException) {
                     throw ce
-                } catch (se: OpenAiHttpStatusException) {
-                    if (se.statusCode == 401 || se.statusCode == 403) {
-                        lastError = IllegalStateException("Invalid Google Gemini API key (${se.statusCode}).", se)
+                } catch (ge: GeminiApiException) {
+                    if (ge.cause is CancellationException) throw ge.cause as CancellationException
+                    if (ge.statusCode in setOf(400, 401, 403)) {
+                        lastError = IllegalStateException(ge.message, ge)
                         break
                     }
-                    lastError = se
-                } catch (he: HttpException) {
-                    if (he.code() == 401 || he.code() == 403) {
-                        lastError = IllegalStateException("Invalid Google Gemini API key (${he.code()}).", he)
-                        break
+                    lastError = ge
+                    if (!discoveredModelsLoaded && ge.statusCode in setOf(404, 429, 503)) {
+                        discoveredModelsLoaded = true
+                        val liveModels = GeminiApiService.fetchAvailableGenerateModels(rawGeminiKey, httpClient)
+                        for (liveModel in liveModels) {
+                            if (liveModel !in attemptedModels && liveModel !in candidateQueue) {
+                                candidateQueue.addLast(liveModel)
+                            }
+                        }
                     }
-                    lastError = he
+                    ge.suggestedModel?.takeIf { it.isNotBlank() && it !in attemptedModels }?.let { suggested ->
+                        candidateQueue.remove(suggested)
+                        candidateQueue.addFirst(suggested)
+                    }
                 } catch (ex: Exception) {
                     lastError = ex
                 }

@@ -83,6 +83,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.build.LocalMediaPipeBuildPipeline
 import com.example.data.build.OfflineApkBuildAndSignEngine
 import com.example.data.github.GitHubBuildRepository
+import com.example.data.storage.PublicDownloadResult
 import com.example.diagnostics.FactoryTelemetryCalculator
 import com.example.model.GitRepoState
 import com.example.model.OfflineSigningStatus
@@ -121,7 +122,12 @@ fun WorkspaceBuildApkTab(
     onTriggerOfflineAiBuildAndSign: (keyAlias: String, storePassword: String, commonName: String) -> Unit = { _, _, _ -> },
     onSignExternalApkOffline: suspend (apkUri: Uri, keyAlias: String, storePassword: String, commonName: String) -> Uri? = { _, _, _, _ -> null },
     onGetOfflineSignedApkUri: () -> Uri? = { null },
+    onSaveOfflineSignedApkToDownloads: suspend () -> PublicDownloadResult = { PublicDownloadResult.Failed("Unavailable") },
+    onSaveCloudApkToDownloads: suspend () -> PublicDownloadResult = { PublicDownloadResult.Failed("Unavailable") },
+    onGetCloudApkShareUri: suspend () -> Uri? = { null },
     onPackageZip: suspend () -> Uri?,
+    onSaveProjectZipToDownloads: suspend () -> PublicDownloadResult = { PublicDownloadResult.Failed("Unavailable") },
+    onCompleteSafSave: suspend (sourceFile: File, destinationUri: Uri) -> Boolean = { _, _ -> false },
     onExportBuildLogs: suspend () -> Uri?,
     onAutoFixProject: () -> Unit = {},
     onOptimizeProject: () -> Unit = {},
@@ -152,11 +158,15 @@ fun WorkspaceBuildApkTab(
     val scope = rememberCoroutineScope()
 
     var isPackagingZip by remember { mutableStateOf(false) }
+    var isSavingZipToDownloads by remember { mutableStateOf(false) }
+    var isSavingApkToDownloads by remember { mutableStateOf(false) }
+    var isSharingCloudApk by remember { mutableStateOf(false) }
+    var pendingSafSourceFile by remember { mutableStateOf<File?>(null) }
     var showGitSection by rememberSaveable { mutableStateOf(false) }
     var showWorkflowPreview by rememberSaveable { mutableStateOf(false) }
-    // 0 = Offline AI & Local Signer, 1 = GitHub Actions Cloud CI
+    // 0 = AI Build & Sign (Local AI or Cloud AI + apksig), 1 = GitHub Fallback (Last Choice)
     var buildModeIndex by rememberSaveable(project.id) {
-        mutableStateOf(if (!hasGitHubPat || offlineSigningStatus.hasKeystore) 0 else 1)
+        mutableStateOf(0)
     }
     var signingAlias by rememberSaveable(project.id) {
         mutableStateOf(offlineSigningStatus.keyAlias.ifBlank { OfflineApkBuildAndSignEngine.DEFAULT_KEY_ALIAS })
@@ -170,12 +180,61 @@ fun WorkspaceBuildApkTab(
     var showSigningConfigFields by rememberSaveable(project.id) { mutableStateOf(false) }
     var showPipelineTasksCode by rememberSaveable(project.id) { mutableStateOf(false) }
 
+    val saveApkDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { destUri ->
+        val src = pendingSafSourceFile
+        pendingSafSourceFile = null
+        if (destUri != null && src != null) {
+            scope.launch {
+                onCompleteSafSave(src, destUri)
+            }
+        }
+    }
+
+    val saveZipDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { destUri ->
+        val src = pendingSafSourceFile
+        pendingSafSourceFile = null
+        if (destUri != null && src != null) {
+            scope.launch {
+                onCompleteSafSave(src, destUri)
+            }
+        }
+    }
+
     val launchApkInstaller: (Uri) -> Unit = { apkUri ->
         val installIntent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(apkUri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         runCatching { context.startActivity(installIntent) }
+    }
+
+    val launchApkShareSheet: (Uri) -> Unit = { apkUri ->
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/vnd.android.package-archive"
+            putExtra(Intent.EXTRA_STREAM, apkUri)
+            putExtra(Intent.EXTRA_SUBJECT, "${project.appName}.apk")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            context.startActivity(
+                Intent.createChooser(shareIntent, "Share ${project.appName}.apk")
+            )
+        }
+    }
+
+    val handlePublicDownloadResult: (PublicDownloadResult, Boolean) -> Unit = { result, isApk ->
+        if (result is PublicDownloadResult.RequiresSafDocument) {
+            pendingSafSourceFile = result.sourceFile
+            if (isApk) {
+                saveApkDocumentLauncher.launch(result.sourceFile.name)
+            } else {
+                saveZipDocumentLauncher.launch(result.sourceFile.name)
+            }
+        }
     }
 
     val pickApkToSignLauncher = rememberLauncherForActivityResult(
@@ -464,7 +523,7 @@ fun WorkspaceBuildApkTab(
                             },
                             modifier = Modifier.testTag("build_mode_offline_ai")
                         ) {
-                            Text("Offline AI & Sign", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("AI Build & Sign", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         SegmentedButton(
                             selected = buildModeIndex == 1,
@@ -479,7 +538,7 @@ fun WorkspaceBuildApkTab(
                             },
                             modifier = Modifier.testTag("build_mode_github_cloud")
                         ) {
-                            Text("GitHub Cloud", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("GitHub Fallback", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
 
@@ -676,9 +735,9 @@ fun WorkspaceBuildApkTab(
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = if (isOfflineBuildBusy) {
-                                    offlineBuildProgress ?: "Building & Signing Offline…"
+                                    offlineBuildProgress ?: "Building & Signing with AI…"
                                 } else {
-                                    "Build, Fix & Sign Offline (AI)"
+                                    "Build, Fix & Sign (AI)"
                                 },
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
@@ -741,9 +800,138 @@ fun WorkspaceBuildApkTab(
                             }
                         }
 
-                        if (!offlineSigningStatus.aiEngineStatus.startsWith("Offline AI Ready")) {
+                        if (hasOfflineSignedApk) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch {
+                                            isSavingApkToDownloads = true
+                                            val result = onSaveOfflineSignedApkToDownloads()
+                                            isSavingApkToDownloads = false
+                                            handlePublicDownloadResult(result, true)
+                                        }
+                                    },
+                                    enabled = !isAnyBuildBusy && !isSavingApkToDownloads,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("save_offline_apk_downloads_button")
+                                ) {
+                                    if (isSavingApkToDownloads) {
+                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = if (isSavingApkToDownloads) "Saving…" else "Save to Downloads",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        val uri = onGetOfflineSignedApkUri()
+                                        if (uri != null) launchApkShareSheet(uri)
+                                    },
+                                    enabled = !isAnyBuildBusy,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("share_offline_apk_button")
+                                ) {
+                                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Share .APK", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        } else {
+                            if (offlineSigningStatus.hasKeystore) {
+                                Text(
+                                    text = "No compiled .apk binary yet — Save/Share the Project .ZIP (includes signing-release.p12), compile via GitHub Cloud, or tap Sign .APK File.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch {
+                                            isSavingZipToDownloads = true
+                                            val result = onSaveProjectZipToDownloads()
+                                            isSavingZipToDownloads = false
+                                            handlePublicDownloadResult(result, false)
+                                        }
+                                    },
+                                    enabled = !isAnyBuildBusy && !isSavingZipToDownloads && !isPackagingZip,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("offline_card_save_zip_button")
+                                ) {
+                                    if (isSavingZipToDownloads) {
+                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = if (isSavingZipToDownloads) "Saving…" else "Save .ZIP",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch {
+                                            isPackagingZip = true
+                                            val zipUri = onPackageZip()
+                                            isPackagingZip = false
+                                            if (zipUri != null) {
+                                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "application/zip"
+                                                    putExtra(Intent.EXTRA_STREAM, zipUri)
+                                                    putExtra(Intent.EXTRA_SUBJECT, "${project.appName} Android Source")
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                }
+                                                runCatching {
+                                                    context.startActivity(
+                                                        Intent.createChooser(shareIntent, "Share ${project.appName}.zip")
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    },
+                                    enabled = !isAnyBuildBusy && !isPackagingZip && !isSavingZipToDownloads,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("offline_card_share_zip_button")
+                                ) {
+                                    if (isPackagingZip) {
+                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Share .ZIP", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+
+                        if (!offlineSigningStatus.aiEngineStatus.startsWith("Offline AI Ready") &&
+                            !offlineSigningStatus.aiEngineStatus.startsWith("Cloud AI Ready")
+                        ) {
                             TextButton(onClick = onOpenSettings) {
-                                Text("Configure/Download Offline AI Model in Settings")
+                                Text("Configure Local AI or Cloud AI in Settings")
                             }
                         }
                     } else {
@@ -796,6 +984,71 @@ fun WorkspaceBuildApkTab(
                             )
                         }
 
+                        if (hasArtifactReady) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilledTonalButton(
+                                    onClick = {
+                                        scope.launch {
+                                            isSavingApkToDownloads = true
+                                            val result = onSaveCloudApkToDownloads()
+                                            isSavingApkToDownloads = false
+                                            handlePublicDownloadResult(result, true)
+                                        }
+                                    },
+                                    enabled = !isAnyBuildBusy && !isSavingApkToDownloads,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("save_cloud_apk_downloads_button")
+                                ) {
+                                    if (isSavingApkToDownloads) {
+                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = if (isSavingApkToDownloads) "Saving…" else "Save to Downloads",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                FilledTonalButton(
+                                    onClick = {
+                                        scope.launch {
+                                            isSharingCloudApk = true
+                                            val shareUri = onGetCloudApkShareUri()
+                                            isSharingCloudApk = false
+                                            if (shareUri != null) {
+                                                launchApkShareSheet(shareUri)
+                                            }
+                                        }
+                                    },
+                                    enabled = !isAnyBuildBusy && !isSharingCloudApk,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("share_cloud_apk_button")
+                                ) {
+                                    if (isSharingCloudApk) {
+                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = if (isSharingCloudApk) "Preparing…" else "Share .APK",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -845,7 +1098,7 @@ fun WorkspaceBuildApkTab(
 
                         if (!hasGitHubPat) {
                             TextButton(onClick = onOpenSettings) {
-                                Text("GitHub PAT missing — Tap to open Settings or switch to Offline AI")
+                                Text("GitHub is optional fallback — add PAT in Settings or use AI Build & Sign")
                             }
                         }
                     }
@@ -1059,6 +1312,30 @@ fun WorkspaceBuildApkTab(
                         }
                     }
 
+                    FilledTonalButton(
+                        onClick = {
+                            scope.launch {
+                                isSavingZipToDownloads = true
+                                val result = onSaveProjectZipToDownloads()
+                                isSavingZipToDownloads = false
+                                handlePublicDownloadResult(result, false)
+                            }
+                        },
+                        enabled = !isSavingZipToDownloads && !isPackagingZip,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .testTag("save_zip_downloads_button")
+                    ) {
+                        if (isSavingZipToDownloads) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.Download, contentDescription = null)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (isSavingZipToDownloads) "Saving ZIP…" else "Save .ZIP to Downloads")
+                    }
+
                     OutlinedButton(
                         onClick = {
                             scope.launch {
@@ -1078,7 +1355,7 @@ fun WorkspaceBuildApkTab(
                                 }
                             }
                         },
-                        enabled = !isPackagingZip,
+                        enabled = !isPackagingZip && !isSavingZipToDownloads,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(50.dp)

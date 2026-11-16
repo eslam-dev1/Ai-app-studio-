@@ -3,6 +3,8 @@ package com.example.data.refactor
 import com.example.BuildConfig
 import com.example.data.remote.ChatCompletionRequest
 import com.example.data.remote.ChatMessage
+import com.example.data.remote.GeminiApiException
+import com.example.data.remote.GeminiApiService
 import com.example.data.remote.OpenAiChatApi
 import com.example.model.AiRefactorPayload
 import com.example.model.AiRefactorResult
@@ -40,15 +42,6 @@ class AiCodeRefactorRepository {
             .writeTimeout(30, TimeUnit.SECONDS)
             .addInterceptor(logging)
             .build()
-    }
-
-    private val googleGeminiApi: OpenAiChatApi by lazy {
-        Retrofit.Builder()
-            .baseUrl("https://generativelanguage.googleapis.com/v1beta/openai/")
-            .client(httpClient)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-            .create(OpenAiChatApi::class.java)
     }
 
     private val openRouterApi: OpenAiChatApi by lazy {
@@ -94,47 +87,62 @@ class AiCodeRefactorRepository {
 
         var lastError: Throwable? = null
 
-        // 1. Primary path: Direct Google Gemini API with automatic next-model fallback on rate limits
+        // 1. Primary path: Direct Google Gemini API with automatic next-model fallback on rate limits or retired models
         if (rawGeminiKey.isNotBlank()) {
-            for ((idx, geminiModel) in OpenRouterModels.directGeminiFallbackChain.withIndex()) {
+            val candidateQueue = ArrayDeque(OpenRouterModels.directGeminiFallbackChain)
+            val attemptedModels = mutableSetOf<String>()
+            var discoveredModelsLoaded = false
+
+            while (candidateQueue.isNotEmpty()) {
+                val geminiModel = candidateQueue.removeFirst()
+                if (!attemptedModels.add(geminiModel)) continue
+
                 try {
-                    if (idx == 0) {
+                    if (attemptedModels.size == 1) {
                         onStatusUpdate("Analyzing $filePath with Gemini ($geminiModel)…")
                     } else {
-                        onStatusUpdate("Rate limit reached — switching to $geminiModel…")
+                        onStatusUpdate("Switching to next valid model ($geminiModel)…")
                     }
 
-                    val response = googleGeminiApi.createChatCompletion(
-                        authorization = "Bearer $rawGeminiKey",
-                        referer = null,
-                        title = null,
-                        request = ChatCompletionRequest(
-                            model = geminiModel,
-                            messages = listOf(systemMessage, userMessage),
-                            temperature = 0.2
-                        )
+                    val geminiResult = GeminiApiService.generateContent(
+                        apiKey = rawGeminiKey,
+                        prompt = userMessage.content,
+                        model = geminiModel,
+                        systemInstruction = REFACTOR_SYSTEM_PROMPT,
+                        temperature = 0.2f,
+                        httpClient = httpClient
                     )
 
-                    val rawContent = response.choices.firstOrNull()?.message?.content
-                        ?: throw IllegalStateException("Empty response from Gemini ($geminiModel).")
-
-                    val payload = extractRefactorPayload(rawContent, fallbackOriginalCode = sourceCode)
+                    val payload = extractRefactorPayload(geminiResult.text, fallbackOriginalCode = sourceCode)
                     return@withContext AiRefactorResult(
                         filePath = filePath,
                         summary = payload.summary,
-                        modelUsed = "Gemini ($geminiModel)",
+                        modelUsed = "Gemini (${geminiResult.model})",
                         suggestions = payload.suggestions,
                         refactoredCode = payload.refactoredCode.ifBlank { sourceCode }
                     )
                 } catch (ce: CancellationException) {
                     throw ce
-                } catch (he: HttpException) {
-                    if (he.code() == 401 || he.code() == 403) {
-                        lastError = IllegalStateException("Invalid Gemini API key (${he.code()}).", he)
+                } catch (ge: GeminiApiException) {
+                    if (ge.cause is CancellationException) throw ge.cause as CancellationException
+                    if (ge.statusCode in setOf(400, 401, 403)) {
+                        lastError = IllegalStateException(ge.message, ge)
                         break
                     }
-                    lastError = he
-                    // Automatically try next valid Gemini model in directGeminiFallbackChain
+                    lastError = ge
+                    if (!discoveredModelsLoaded && ge.statusCode in setOf(404, 429, 503)) {
+                        discoveredModelsLoaded = true
+                        val liveModels = GeminiApiService.fetchAvailableGenerateModels(rawGeminiKey, httpClient)
+                        for (liveModel in liveModels) {
+                            if (liveModel !in attemptedModels && liveModel !in candidateQueue) {
+                                candidateQueue.addLast(liveModel)
+                            }
+                        }
+                    }
+                    ge.suggestedModel?.takeIf { it.isNotBlank() && it !in attemptedModels }?.let { suggested ->
+                        candidateQueue.remove(suggested)
+                        candidateQueue.addFirst(suggested)
+                    }
                 } catch (ex: Exception) {
                     lastError = ex
                 }

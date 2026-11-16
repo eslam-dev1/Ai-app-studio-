@@ -1,7 +1,11 @@
 package com.example.data.storage
 
+import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import com.example.data.local.StudioAppDatabase
@@ -23,6 +27,12 @@ import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+
+sealed interface PublicDownloadResult {
+    data class Saved(val displayLocation: String, val uri: Uri) : PublicDownloadResult
+    data class RequiresSafDocument(val sourceFile: File, val mimeType: String) : PublicDownloadResult
+    data class Failed(val reason: String) : PublicDownloadResult
+}
 
 class ProjectStorageRepository(private val context: Context) {
 
@@ -169,7 +179,7 @@ class ProjectStorageRepository(private val context: Context) {
         runCatching { sqlRepository.deleteProject(projectId) }
     }
 
-    suspend fun exportProjectToZip(project: StudioProject): Uri = withContext(Dispatchers.IO) {
+    suspend fun exportProjectToZipFile(project: StudioProject): File = withContext(Dispatchers.IO) {
         val safeName = project.appName
             .lowercase()
             .replace(Regex("[^a-z0-9]+"), "-")
@@ -188,12 +198,73 @@ class ProjectStorageRepository(private val context: Context) {
                 }
             }
         }
+        zipFile
+    }
 
+    suspend fun exportProjectToZip(project: StudioProject): Uri = withContext(Dispatchers.IO) {
+        val zipFile = exportProjectToZipFile(project)
         FileProvider.getUriForFile(
             context,
             "${context.packageName}.fileprovider",
             zipFile
         )
+    }
+
+    suspend fun saveFileToPublicDownloads(
+        sourceFile: File,
+        mimeType: String
+    ): PublicDownloadResult = withContext(Dispatchers.IO) {
+        if (!sourceFile.exists() || sourceFile.length() == 0L) {
+            return@withContext PublicDownloadResult.Failed("File not found: ${sourceFile.name}")
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return@withContext PublicDownloadResult.RequiresSafDocument(sourceFile, mimeType)
+        }
+
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, sourceFile.name)
+            put(MediaStore.Downloads.MIME_TYPE, mimeType)
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+
+        val itemUri = runCatching {
+            resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+        }.getOrNull() ?: return@withContext PublicDownloadResult.RequiresSafDocument(sourceFile, mimeType)
+
+        try {
+            resolver.openOutputStream(itemUri)?.use { output ->
+                sourceFile.inputStream().use { input ->
+                    input.copyTo(output, bufferSize = 64 * 1024)
+                }
+            } ?: run {
+                runCatching { resolver.delete(itemUri, null, null) }
+                return@withContext PublicDownloadResult.RequiresSafDocument(sourceFile, mimeType)
+            }
+
+            val doneValues = ContentValues().apply {
+                put(MediaStore.Downloads.IS_PENDING, 0)
+            }
+            resolver.update(itemUri, doneValues, null, null)
+            PublicDownloadResult.Saved("Downloads/${sourceFile.name}", itemUri)
+        } catch (ex: Exception) {
+            runCatching { resolver.delete(itemUri, null, null) }
+            PublicDownloadResult.Failed(ex.localizedMessage ?: "Failed to write to Downloads")
+        }
+    }
+
+    suspend fun copyFileToUri(sourceFile: File, destinationUri: Uri): Result<Long> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (!sourceFile.exists() || sourceFile.length() == 0L) {
+                throw IllegalStateException("Source file missing: ${sourceFile.name}")
+            }
+            context.contentResolver.openOutputStream(destinationUri)?.use { output ->
+                sourceFile.inputStream().use { input ->
+                    input.copyTo(output, bufferSize = 64 * 1024)
+                }
+            } ?: throw IllegalStateException("Unable to open destination file for writing.")
+        }
     }
 
     suspend fun exportBuildLogsToTxt(project: StudioProject, logs: List<com.example.model.ConsoleLogEntry>): Uri = withContext(Dispatchers.IO) {

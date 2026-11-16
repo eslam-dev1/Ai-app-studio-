@@ -13,6 +13,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.service.BackgroundTaskManager
@@ -489,5 +490,268 @@ class CyberCodeFactoryRobolectricTest {
         composeRule.onNodeWithTag("factory_node_compiling").assertContentDescriptionEquals("COMPILING completed")
         composeRule.onNodeWithTag("factory_node_generating").assertContentDescriptionEquals("GENERATING completed")
         composeRule.onNodeWithTag("factory_node_assembling").assertContentDescriptionEquals("ASSEMBLING completed")
+    }
+
+    @Test
+    fun generatorScreen_displaysDynamicSuggestionsAboveInputAndFallsBackWhenEmpty() {
+        var dynamicSuggestions by mutableStateOf<List<String>>(emptyList())
+
+        composeRule.setContent {
+            AiAppStudioTheme(darkTheme = true) {
+                com.example.ui.screens.GeneratorScreen(
+                    settings = com.example.model.StudioSettings(),
+                    projects = emptyList(),
+                    generationState = com.example.model.GenerationUiState.Idle,
+                    dynamicSuggestions = dynamicSuggestions,
+                    onEngineModeChange = {},
+                    onOpenSettings = {},
+                    onGenerateApp = {},
+                    onCancelGeneration = {},
+                    onOpenProject = {},
+                    onDeleteProject = {}
+                )
+            }
+        }
+
+        // Default fallback smart chips shown when dynamicSuggestions is empty
+        composeRule.onNodeWithTag("quick_start_pills_row").assertIsDisplayed()
+        composeRule.onNodeWithText("🤖 Build an Android app").assertIsDisplayed()
+
+        // Update with dynamic AI-generated follow-up chips
+        composeRule.runOnIdle {
+            dynamicSuggestions = listOf("Add biometric lock", "Add CSV export", "Add statistics chart")
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("dynamic_suggestion_chip_0").assertIsDisplayed()
+        composeRule.onNodeWithText("Add biometric lock").assertIsDisplayed()
+        composeRule.onNodeWithText("Add CSV export").assertIsDisplayed()
+        composeRule.onNodeWithText("🤖 Build an Android app").assertDoesNotExist()
+
+        // Tapping a dynamic chip populates the prompt input
+        composeRule.onNodeWithTag("dynamic_suggestion_chip_0").performClick()
+        composeRule.onNodeWithTag("app_prompt_input").assertTextEquals("Add biometric lock")
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "w412dp-h915dp")
+    fun workspaceBuildApkTab_displaysSaveToDownloadsAndShareButtonsForApkAndZip() {
+        var saveOfflineApkCalled = false
+        var saveZipCalled = false
+        var getShareUriCalled = false
+
+        val project = com.example.model.StudioProject(
+            id = "p-download-share",
+            appName = "Pocket Vault",
+            packageName = "com.example.pocketvault",
+            prompt = "Encrypted notes",
+            files = listOf(
+                com.example.model.GeneratedFile("app/build.gradle.kts", "android { compileSdk = 36 }")
+            )
+        )
+
+        composeRule.setContent {
+            AiAppStudioTheme(darkTheme = true) {
+                com.example.ui.screens.WorkspaceBuildApkTab(
+                    project = project,
+                    settings = com.example.model.StudioSettings(),
+                    gitState = com.example.model.GitRepoState(),
+                    hasGitHubPat = false,
+                    isGitBusy = false,
+                    isCloudBuildBusy = false,
+                    cloudBuildProgress = null,
+                    offlineSigningStatus = com.example.model.OfflineSigningStatus(
+                        hasKeystore = true,
+                        signedApkPath = "/tmp/pocket-vault-offline-signed.apk",
+                        signedApkSizeBytes = 256 * 1024L,
+                        isSignatureVerified = true,
+                        v1Signed = true,
+                        v2Signed = true,
+                        v3Signed = true
+                    ),
+                    onTriggerCloudBuild = {},
+                    onRefreshCloudBuildStatus = {},
+                    onGetOfflineSignedApkUri = {
+                        getShareUriCalled = true
+                        null
+                    },
+                    onSaveOfflineSignedApkToDownloads = {
+                        saveOfflineApkCalled = true
+                        com.example.data.storage.PublicDownloadResult.Saved(
+                            "Downloads/pocket-vault-offline-signed.apk",
+                            android.net.Uri.parse("content://downloads/1")
+                        )
+                    },
+                    onPackageZip = { null },
+                    onSaveProjectZipToDownloads = {
+                        saveZipCalled = true
+                        com.example.data.storage.PublicDownloadResult.Saved(
+                            "Downloads/pocket-vault.zip",
+                            android.net.Uri.parse("content://downloads/2")
+                        )
+                    },
+                    onExportBuildLogs = { null },
+                    onInitGit = {},
+                    onRefreshGit = {},
+                    onStageFile = {},
+                    onUnstageFile = {},
+                    onStageAll = {},
+                    onCommitGit = {},
+                    onConfigureRemote = {},
+                    onPushGit = {},
+                    onPullGit = {},
+                    onOpenConsole = {},
+                    onOpenSettings = {}
+                )
+            }
+        }
+
+        val list = composeRule.onNodeWithTag("workspace_build_apk_tab")
+        list.performScrollToNode(hasTestTag("save_offline_apk_downloads_button"))
+        composeRule.onNodeWithTag("save_offline_apk_downloads_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.onNodeWithTag("share_offline_apk_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.waitForIdle()
+
+        assertTrue(saveOfflineApkCalled)
+        assertTrue(getShareUriCalled)
+
+        list.performScrollToNode(hasTestTag("save_zip_downloads_button"))
+        composeRule.onNodeWithTag("save_zip_downloads_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.onNodeWithTag("export_zip_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.waitForIdle()
+
+        assertTrue(saveZipCalled)
+    }
+
+    @Test
+    fun projectStorageRepository_exportsZipAndCopiesFileToDestinationUri() = kotlinx.coroutines.runBlocking {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val repo = com.example.data.storage.ProjectStorageRepository(context)
+        val project = com.example.model.StudioProject(
+            id = "zip-test-real",
+            appName = "My Signed App",
+            packageName = "com.studio.signedapp",
+            prompt = "Test zip",
+            files = listOf(
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/java/com/studio/signedapp/MainActivity.kt",
+                    content = "package com.studio.signedapp\nclass MainActivity"
+                ),
+                com.example.model.GeneratedFile(
+                    path = "keystore.properties",
+                    content = "keyAlias=release"
+                )
+            )
+        )
+
+        val zipFile = repo.exportProjectToZipFile(project)
+        assertTrue(zipFile.exists())
+        assertTrue(zipFile.length() > 0L)
+        assertTrue(zipFile.name.startsWith("my-signed-app-"))
+        assertTrue(zipFile.name.endsWith(".zip"))
+
+        val entryNames = mutableListOf<String>()
+        java.util.zip.ZipInputStream(zipFile.inputStream()).use { zis ->
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                entryNames += entry.name
+                zis.closeEntry()
+            }
+        }
+        assertTrue(entryNames.any { it.endsWith("MainActivity.kt") })
+        assertTrue(entryNames.any { it.endsWith("keystore.properties") })
+
+        val destFile = java.io.File(context.cacheDir, "copied-signed-app.zip")
+        val copyResult = repo.copyFileToUri(zipFile, android.net.Uri.fromFile(destFile))
+        assertTrue(copyResult.isSuccess)
+        assertTrue(destFile.exists())
+        assertEquals(zipFile.length(), destFile.length())
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "w412dp-h915dp")
+    fun workspaceBuildApkTab_displaysSaveAndShareZipInsideBuilderCardWhenPkcs12ReadyWithoutApk() {
+        var saveZipCalled = false
+        var shareZipCalled = false
+
+        val project = com.example.model.StudioProject(
+            id = "p-pkcs12-only",
+            appName = "HabitTracker",
+            packageName = "com.studio.app",
+            prompt = "Habit tracker",
+            files = listOf(
+                com.example.model.GeneratedFile("app/build.gradle.kts", "android { compileSdk = 36 }")
+            )
+        )
+
+        composeRule.setContent {
+            AiAppStudioTheme(darkTheme = true) {
+                com.example.ui.screens.WorkspaceBuildApkTab(
+                    project = project,
+                    settings = com.example.model.StudioSettings(),
+                    gitState = com.example.model.GitRepoState(),
+                    hasGitHubPat = false,
+                    isGitBusy = false,
+                    isCloudBuildBusy = false,
+                    cloudBuildProgress = null,
+                    offlineSigningStatus = com.example.model.OfflineSigningStatus(
+                        hasKeystore = true,
+                        signedApkPath = null,
+                        isSignatureVerified = false
+                    ),
+                    onTriggerCloudBuild = {},
+                    onRefreshCloudBuildStatus = {},
+                    onPackageZip = {
+                        shareZipCalled = true
+                        null
+                    },
+                    onSaveProjectZipToDownloads = {
+                        saveZipCalled = true
+                        com.example.data.storage.PublicDownloadResult.Saved(
+                            "Downloads/habittracker.zip",
+                            android.net.Uri.parse("content://downloads/3")
+                        )
+                    },
+                    onExportBuildLogs = { null },
+                    onInitGit = {},
+                    onRefreshGit = {},
+                    onStageFile = {},
+                    onUnstageFile = {},
+                    onStageAll = {},
+                    onCommitGit = {},
+                    onConfigureRemote = {},
+                    onPushGit = {},
+                    onPullGit = {},
+                    onOpenConsole = {},
+                    onOpenSettings = {}
+                )
+            }
+        }
+
+        val list = composeRule.onNodeWithTag("workspace_build_apk_tab")
+        list.performScrollToNode(hasTestTag("offline_card_save_zip_button"))
+        composeRule.onNodeWithTag("offline_card_save_zip_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.onNodeWithTag("offline_card_share_zip_button")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.waitForIdle()
+
+        assertTrue(saveZipCalled)
+        assertTrue(shareZipCalled)
     }
 }

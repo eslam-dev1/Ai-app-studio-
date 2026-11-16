@@ -118,6 +118,7 @@ import com.example.data.gradle.GradleDependencyManager
 import com.example.data.local.CustomSqlTableEntity
 import com.example.data.local.ProjectSqlEntity
 import com.example.data.local.SqlColumnSpec
+import com.example.data.storage.PublicDownloadResult
 import com.example.diagnostics.ProjectStaticAnalyzer
 import com.example.model.AutoSaveStatus
 import com.example.model.ConsoleLogEntry
@@ -219,7 +220,12 @@ fun WorkspaceScreen(
     onTriggerOfflineAiBuildAndSign: (keyAlias: String, storePassword: String, commonName: String) -> Unit = { _, _, _ -> },
     onSignExternalApkOffline: suspend (apkUri: Uri, keyAlias: String, storePassword: String, commonName: String) -> Uri? = { _, _, _, _ -> null },
     onGetOfflineSignedApkUri: () -> Uri? = { null },
+    onSaveOfflineSignedApkToDownloads: suspend () -> PublicDownloadResult = { PublicDownloadResult.Failed("Unavailable") },
+    onSaveCloudApkToDownloads: suspend () -> PublicDownloadResult = { PublicDownloadResult.Failed("Unavailable") },
+    onGetCloudApkShareUri: suspend () -> Uri? = { null },
     onPackageZip: suspend () -> android.net.Uri?,
+    onSaveProjectZipToDownloads: suspend () -> PublicDownloadResult = { PublicDownloadResult.Failed("Unavailable") },
+    onCompleteSafSave: suspend (sourceFile: java.io.File, destinationUri: Uri) -> Boolean = { _, _ -> false },
     onExportBuildLogs: suspend () -> android.net.Uri?,
     onInitGit: () -> Unit,
     onRefreshGit: () -> Unit,
@@ -552,7 +558,12 @@ fun WorkspaceScreen(
                                 onTriggerOfflineAiBuildAndSign = onTriggerOfflineAiBuildAndSign,
                                 onSignExternalApkOffline = onSignExternalApkOffline,
                                 onGetOfflineSignedApkUri = onGetOfflineSignedApkUri,
+                                onSaveOfflineSignedApkToDownloads = onSaveOfflineSignedApkToDownloads,
+                                onSaveCloudApkToDownloads = onSaveCloudApkToDownloads,
+                                onGetCloudApkShareUri = onGetCloudApkShareUri,
                                 onPackageZip = onPackageZip,
+                                onSaveProjectZipToDownloads = onSaveProjectZipToDownloads,
+                                onCompleteSafSave = onCompleteSafSave,
                                 onExportBuildLogs = onExportBuildLogs,
                                 onAutoFixProject = onAutoFixProject,
                                 onOptimizeProject = onOptimizeProject,

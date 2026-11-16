@@ -1599,10 +1599,17 @@ class StudioCoreUnitTest {
         val parsedHeuristic = com.example.data.generator.AiCodeParser.parse(rawHeuristic)
         assertTrue(parsedHeuristic.files.any { it.content.contains("RawScreen") })
 
-        // Stage 4: Graceful Fallback Wrapper for arbitrary text or partial snippet
+        // Empty or unparseable output throws IllegalStateException instead of returning fallback boilerplate
+        val blankErr = runCatching {
+            com.example.data.generator.AiCodeParser.parse("   ")
+        }.exceptionOrNull()
+        assertTrue(blankErr is IllegalStateException)
+
         val rawArbitrary = "Build a todo app with list and add button"
-        val parsedFallback = com.example.data.generator.AiCodeParser.parse(rawArbitrary)
-        assertTrue(parsedFallback.files.any { it.content.contains("class MainActivity") })
+        val arbitraryErr = runCatching {
+            com.example.data.generator.AiCodeParser.parse(rawArbitrary)
+        }.exceptionOrNull()
+        assertTrue(arbitraryErr is IllegalStateException)
     }
 
     @Test
@@ -2330,6 +2337,215 @@ class StudioCoreUnitTest {
         assertFalse(hydrated.githubActionsRequired)
         assertTrue(hydrated.generatedByMediaPipe)
         assertEquals(5, hydrated.tasks.size)
+    }
+
+    @Test
+    fun projectStaticAnalyzer_handlesCharLiteralsAndEscapedBackslashes() {
+        val validKt = com.example.model.GeneratedFile(
+            path = "app/src/main/java/com/studio/app/Tokenizer.kt",
+            content = """
+                package com.studio.app
+
+                fun scanTokens(input: String): Boolean {
+                    val pathSep = "C:\\"
+                    val quoteChar = '"'
+                    val openBrace = '{'
+                    val escapedQuote = '\''
+                    val escapedSlash = '\\'
+                    return input.contains(openBrace) && pathSep.isNotEmpty() && quoteChar != escapedQuote && escapedSlash == '\\'
+                }
+            """.trimIndent()
+        )
+        val diagnostics = com.example.diagnostics.ProjectStaticAnalyzer.analyzeSingleFile(validKt)
+        assertFalse(diagnostics.any { it.level == com.example.model.ConsoleLogLevel.ERROR })
+    }
+
+    @Test
+    fun aiCodeParser_splitsMultiFileMarkersAndStripsHeaders() {
+        val fencedMulti = """
+            ```kotlin
+            // FILE: app/src/main/java/com/studio/app/MainActivity.kt
+            package com.studio.app
+            class MainActivity
+
+            // FILE: app/src/main/java/com/studio/app/Theme.kt
+            package com.studio.app
+            fun AppTheme() {}
+            ```
+        """.trimIndent()
+
+        val parsed = com.example.data.generator.AiCodeParser.parse(fencedMulti)
+        val mainFile = parsed.files.firstOrNull { it.path == "app/src/main/java/com/studio/app/MainActivity.kt" }
+        val themeFile = parsed.files.firstOrNull { it.path == "app/src/main/java/com/studio/app/Theme.kt" }
+        assertNotNull(mainFile)
+        assertNotNull(themeFile)
+        assertFalse(mainFile!!.content.contains("// FILE:"))
+        assertFalse(themeFile!!.content.contains("// FILE:"))
+    }
+
+    @Test
+    fun geminiApiService_discoversAndRanksLiveGenerateModels() {
+        val modelsJson = """
+            {
+              "models": [
+                {"name": "models/text-embedding-004", "supportedGenerationMethods": ["embedContent"]},
+                {"name": "models/gemini-2.5-pro", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-2.5-flash-tts", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]}
+              ]
+            }
+        """.trimIndent()
+
+        val discovered = com.example.data.remote.GeminiApiService.parseAvailableGenerateModels(modelsJson)
+        assertEquals("gemini-3.8-flash", discovered.first())
+        assertTrue(discovered.contains("gemini-2.5-flash"))
+        assertTrue(discovered.contains("gemini-2.5-pro"))
+        assertFalse(discovered.any { it.contains("embedding") || it.contains("tts") })
+
+        val suggested = com.example.data.remote.GeminiApiService.extractSuggestedModelFromError(
+            "This model models/gemini-2.0-flash is no longer available. Please update your code to use models/gemini-3.8-flash for the latest features."
+        )
+        assertEquals("gemini-3.8-flash", suggested)
+    }
+
+    @Test
+    fun jsonProjectExtractor_parsesOptionalDynamicSuggestionsAndDefaultsWhenOmitted() {
+        val rawWithSuggestions = """
+            {
+              "appName": "Vault Notes",
+              "packageName": "com.studio.vaultnotes",
+              "suggestions": [
+                "  Add biometric lock  ",
+                "Add CSV export",
+                "Add statistics chart",
+                "Add biometric lock",
+                "Add reminder notifications",
+                "Extra fifth item"
+              ],
+              "files": [
+                { "path": "app/src/main/java/com/studio/vaultnotes/MainActivity.kt", "content": "package com.studio.vaultnotes\nclass MainActivity" }
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = JsonProjectExtractor.extract(rawWithSuggestions)
+        assertEquals(
+            listOf("Add biometric lock", "Add CSV export", "Add statistics chart", "Add reminder notifications"),
+            parsed.suggestions
+        )
+        val result = com.example.data.generator.GenerationResult(
+            payload = parsed,
+            modelUsed = "Gemini Free (gemini-3.8-flash)"
+        )
+        assertEquals(parsed.suggestions, result.suggestions)
+
+        val rawWithoutSuggestions = """
+            {
+              "appName": "Plain App",
+              "packageName": "com.studio.plain",
+              "files": [
+                { "path": "app/src/main/java/com/studio/plain/MainActivity.kt", "content": "package com.studio.plain\nclass MainActivity" }
+              ]
+            }
+        """.trimIndent()
+        val parsedWithout = JsonProjectExtractor.extract(rawWithoutSuggestions)
+        assertTrue(parsedWithout.suggestions.isEmpty())
+    }
+
+    @Test
+    fun geminiApiService_streamsSseChunksFiltersThoughtsAndFallsBackOn500() = runBlocking {
+        val ssePayload = buildString {
+            appendLine("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Thinking about architecture...\",\"thought\":true}]}}]}")
+            appendLine()
+            appendLine("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"{\\\"appName\\\": \\\"Streamed App\\\",\\n\"}]}}]}")
+            appendLine()
+            appendLine("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\\\"packageName\\\": \\\"com.studio.stream\\\", \"}]}}]}")
+            appendLine()
+            appendLine("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\\\"files\\\": []}\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"totalTokenCount\":412}}")
+            appendLine()
+            appendLine("data: [DONE]")
+        }
+
+        val streamingUrls = mutableListOf<String>()
+        val sseClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                streamingUrls += req.url.toString()
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "text/event-stream; charset=utf-8")
+                    .body(okhttp3.ResponseBody.create(null, ssePayload))
+                    .build()
+            }
+            .build()
+
+        val emittedChunks = mutableListOf<String>()
+        val streamResult = com.example.data.remote.GeminiApiService.generateContent(
+            apiKey = "test_key_123",
+            prompt = "Build a notes app",
+            model = "gemini-3.8-flash",
+            onTokenChunk = { accumulated -> emittedChunks += accumulated },
+            httpClient = sseClient
+        )
+
+        assertTrue(streamingUrls.single().contains(":streamGenerateContent?alt=sse"))
+        assertTrue(emittedChunks.size >= 2)
+        assertFalse(streamResult.text.contains("Thinking about architecture"))
+        assertTrue(streamResult.text.contains("\"appName\": \"Streamed App\""))
+        assertEquals(412L, streamResult.tokensUsed)
+        assertEquals("STOP", streamResult.finishReason)
+
+        // Verify fallback to unary :generateContent when :streamGenerateContent returns 500
+        val fallbackUrls = mutableListOf<String>()
+        val fallbackClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                fallbackUrls += url
+                if (url.contains(":streamGenerateContent")) {
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(500)
+                        .message("Internal Server Error")
+                        .body(okhttp3.ResponseBody.create(null, "{\"error\":{\"message\":\"Stream glitch\"}}"))
+                        .build()
+                } else {
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .header("Content-Type", "application/json")
+                        .body(
+                            okhttp3.ResponseBody.create(
+                                null,
+                                "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Unary OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"totalTokenCount\":99}}"
+                            )
+                        )
+                        .build()
+                }
+            }
+            .build()
+
+        val fallbackEmits = mutableListOf<String>()
+        val fallbackResult = com.example.data.remote.GeminiApiService.generateContent(
+            apiKey = "test_key_123",
+            prompt = "Build a notes app",
+            model = "gemini-3.8-flash",
+            onTokenChunk = { fallbackEmits += it },
+            httpClient = fallbackClient
+        )
+        assertEquals(2, fallbackUrls.size)
+        assertTrue(fallbackUrls[0].contains(":streamGenerateContent"))
+        assertTrue(fallbackUrls[1].contains(":generateContent"))
+        assertEquals("Unary OK", fallbackResult.text)
+        assertEquals(listOf("Unary OK"), fallbackEmits)
+        assertEquals(99L, fallbackResult.tokensUsed)
     }
 }
 

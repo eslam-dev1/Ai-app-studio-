@@ -113,6 +113,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val _generationState = MutableStateFlow<GenerationUiState>(GenerationUiState.Idle)
     val generationState: StateFlow<GenerationUiState> = _generationState.asStateFlow()
 
+    private val _dynamicSuggestions = MutableStateFlow<List<String>>(emptyList())
+    val dynamicSuggestions: StateFlow<List<String>> = _dynamicSuggestions.asStateFlow()
+
     private val _activeProject = MutableStateFlow<StudioProject?>(null)
     val activeProject: StateFlow<StudioProject?> = _activeProject.asStateFlow()
 
@@ -1589,6 +1592,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 appendConsoleEntries(ProjectStaticAnalyzer.analyzeProject(saved))
                 refreshGitStatus(saved.id)
+                _dynamicSuggestions.value = result.suggestions
                 _generationState.value = GenerationUiState.Success(
                     projectId = saved.id,
                     appName = saved.appName
@@ -3038,13 +3042,56 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     suspend fun downloadReadyApkUri(): Uri? {
+        val apkFile = resolveOrDownloadCloudApkFile(forceRefresh = true) ?: return null
+        val sizeFormatted = formatApkFileSize(apkFile.length())
+        _snackbarMessage.value = "Build Complete: ${apkFile.name} ($sizeFormatted)"
+        appendConsoleLog(
+            level = ConsoleLogLevel.SUCCESS,
+            tag = "ApkInstaller",
+            message = "Downloaded ${apkFile.name} ($sizeFormatted). Launching Android Package Installer…"
+        )
+        return androidx.core.content.FileProvider.getUriForFile(
+            getApplication(),
+            "${getApplication<Application>().packageName}.fileprovider",
+            apkFile
+        )
+    }
+
+    suspend fun getShareableCloudApkUri(): Uri? {
+        val apkFile = resolveOrDownloadCloudApkFile(forceRefresh = false) ?: return null
+        return androidx.core.content.FileProvider.getUriForFile(
+            getApplication(),
+            "${getApplication<Application>().packageName}.fileprovider",
+            apkFile
+        )
+    }
+
+    suspend fun saveCloudApkToDownloads(): com.example.data.storage.PublicDownloadResult {
+        val apkFile = resolveOrDownloadCloudApkFile(forceRefresh = false)
+            ?: return com.example.data.storage.PublicDownloadResult.Failed(
+                "APK artifact could not be downloaded yet."
+            )
+        return saveFileToDownloadsWithFeedback(
+            sourceFile = apkFile,
+            mimeType = "application/vnd.android.package-archive"
+        )
+    }
+
+    private suspend fun resolveOrDownloadCloudApkFile(forceRefresh: Boolean): File? {
         val project = _activeProject.value ?: return null
+        val downloadsDir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+        val cachedApk = File(downloadsDir, "${safeAppSlug(project.appName)}-debug.apk")
+        if (!forceRefresh && cachedApk.exists() && cachedApk.length() > 0L) {
+            return cachedApk
+        }
+
         val owner = project.gitHubRepoOwner?.takeIf { it.isNotBlank() }
         val repo = project.gitHubRepoName?.takeIf { it.isNotBlank() }
         val runId = project.lastWorkflowRunId
         val pat = settings.value.gitHubPat.trim()
 
         if (owner == null || repo == null || runId == null || pat.isBlank()) {
+            if (cachedApk.exists() && cachedApk.length() > 0L) return cachedApk
             appendConsoleLog(
                 level = ConsoleLogLevel.WARN,
                 tag = "ApkDownloader",
@@ -3056,7 +3103,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         _isCloudBuildBusy.value = true
         _cloudBuildProgress.value = "Fetching compiled APK artifact from GitHub Actions…"
         return try {
-            val downloadsDir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
             val apkFile = gitHubRepository.downloadCompiledApkArtifact(
                 pat = pat,
                 owner = owner,
@@ -3067,19 +3113,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 onProgress = { msg -> _cloudBuildProgress.value = msg }
             )
             if (apkFile != null && apkFile.exists() && apkFile.length() > 0L) {
-                val sizeFormatted = formatApkFileSize(apkFile.length())
-                _snackbarMessage.value = "Build Complete: ${apkFile.name} ($sizeFormatted)"
-                val uri = androidx.core.content.FileProvider.getUriForFile(
-                    getApplication(),
-                    "${getApplication<Application>().packageName}.fileprovider",
-                    apkFile
-                )
-                appendConsoleLog(
-                    level = ConsoleLogLevel.SUCCESS,
-                    tag = "ApkInstaller",
-                    message = "Downloaded ${apkFile.name} ($sizeFormatted). Launching Android Package Installer…"
-                )
-                uri
+                apkFile
             } else {
                 appendConsoleLog(
                     level = ConsoleLogLevel.WARN,
@@ -3148,10 +3182,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         } else null
 
         val offlineModel = resolveExistingOfflineModelFile(settings.value)
-        val aiStatus = if (offlineModel != null) {
-            "Offline AI Ready (${settings.value.localModelDisplayName.ifBlank { offlineModel.name }})"
-        } else {
-            "Static Analyzer Ready (Download Local AI model in Settings for LLM repair)"
+        val cloudProvider = com.example.data.preferences.ApiCredentialValidator.resolveConfiguredProvider(settings.value)
+        val preferLocal = settings.value.aiEngineMode == AiEngineMode.ON_DEVICE_MEDIAPIPE
+        val aiStatus = when {
+            preferLocal && offlineModel != null ->
+                "Offline AI Ready (${settings.value.localModelDisplayName.ifBlank { offlineModel.name }})"
+            cloudProvider != null ->
+                "Cloud AI Ready ($cloudProvider)"
+            offlineModel != null ->
+                "Offline AI Ready (${settings.value.localModelDisplayName.ifBlank { offlineModel.name }})"
+            else ->
+                "Static Analyzer Ready (Configure Cloud AI or Local AI in Settings)"
         }
 
         val pipelineManifest = LocalMediaPipeBuildPipeline.inspectProjectPipeline(project)
@@ -3197,11 +3238,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 val latest = _activeProject.value ?: current
                 val currentSettings = settings.value
                 val offlineModelFile = resolveExistingOfflineModelFile(currentSettings)
+                val cloudProvider = com.example.data.preferences.ApiCredentialValidator.resolveConfiguredProvider(currentSettings)
+                val preferLocalAi = (currentSettings.aiEngineMode == AiEngineMode.ON_DEVICE_MEDIAPIPE && offlineModelFile != null) ||
+                    (cloudProvider == null && offlineModelFile != null)
 
                 appendConsoleLog(
                     level = ConsoleLogLevel.INFO,
-                    tag = "OfflineBuilder",
-                    message = "Starting Offline MediaPipe LLM Build & Signing pipeline for '${latest.appName}' (zero GitHub/network dependency)…"
+                    tag = "AiBuilder",
+                    message = "Starting AI Build & Signing pipeline for '${latest.appName}' (Local/Cloud AI first, zero GitHub)…"
                 )
 
                 // Step 1: Deterministic Auto-Fix
@@ -3210,10 +3254,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 var workingProject = autoFixedProject
                 quickFixes.forEach { fix ->
-                    appendConsoleLog(level = ConsoleLogLevel.SUCCESS, tag = "OfflineAutoFix", message = fix)
+                    appendConsoleLog(level = ConsoleLogLevel.SUCCESS, tag = "AiAutoFix", message = fix)
                 }
 
-                // Step 2: Static Analysis + Offline MediaPipe LLM Repair if errors remain
+                // Step 2: Static Analysis + Local MediaPipe AI or Cloud AI Repair if errors remain
                 var diagnostics = withContext(Dispatchers.Default) {
                     ProjectStaticAnalyzer.analyzeProject(workingProject)
                 }
@@ -3225,64 +3269,118 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     .mapNotNull { it.filePath }
                     .distinct()
 
-                if (offlineModelFile != null && failingKotlinFiles.isNotEmpty()) {
-                    _offlineBuildProgress.value = "MediaPipe LLM (${offlineModelFile.name}) repairing ${failingKotlinFiles.size} file(s)…"
-                    appendConsoleLog(
-                        level = ConsoleLogLevel.INFO,
-                        tag = "OfflineAI",
-                        message = "Invoking on-device MediaPipe LLM (${offlineModelFile.name}) to repair ${failingKotlinFiles.size} file(s)…"
-                    )
+                if (failingKotlinFiles.isNotEmpty() && (offlineModelFile != null || cloudProvider != null)) {
                     for (path in failingKotlinFiles.take(2)) {
                         val targetFile = workingProject.files.firstOrNull { it.path == path } ?: continue
-                        val repairPrompt = OfflineApkBuildAndSignEngine.buildOfflineKotlinRepairPrompt(targetFile, diagnostics)
-                        val repaired = runCatching {
-                            val (response, durationMs) = generatorRepository.runLocalPromptBenchmarkStep(
-                                savedModelPath = offlineModelFile.absolutePath,
-                                prompt = repairPrompt,
-                                onStreamToken = { stream -> _offlineBuildStreamPreview.value = stream }
-                            )
+                        val fileErrorTrace = diagnostics
+                            .filter { it.filePath == path }
+                            .joinToString("\n") { "[${it.level.name}] Line ${it.lineNumber ?: 1}: ${it.message}" }
+
+                        var repairedFile: GeneratedFile? = null
+
+                        if (preferLocalAi && offlineModelFile != null) {
+                            _offlineBuildProgress.value = "Local AI (${offlineModelFile.name}) repairing ${path.substringAfterLast('/')}…"
                             appendConsoleLog(
-                                level = ConsoleLogLevel.DEBUG,
+                                level = ConsoleLogLevel.INFO,
                                 tag = "OfflineAI",
-                                message = "MediaPipe LLM processed ${targetFile.path.substringAfterLast('/')} in ${durationMs} ms",
-                                filePath = targetFile.path
+                                message = "Invoking Local MediaPipe AI (${offlineModelFile.name}) to repair ${path}…",
+                                filePath = path
                             )
-                            OfflineApkBuildAndSignEngine.extractRepairedKotlinIfCleaner(targetFile, response)
-                        }.getOrElse { err ->
-                            appendConsoleLog(
-                                level = ConsoleLogLevel.WARN,
-                                tag = "OfflineAI",
-                                message = "Offline AI repair skipped for ${targetFile.path}: ${err.localizedMessage}",
-                                filePath = targetFile.path
-                            )
-                            null
+                            val repairPrompt = OfflineApkBuildAndSignEngine.buildOfflineKotlinRepairPrompt(targetFile, diagnostics)
+                            repairedFile = runCatching {
+                                val (response, durationMs) = generatorRepository.runLocalPromptBenchmarkStep(
+                                    savedModelPath = offlineModelFile.absolutePath,
+                                    prompt = repairPrompt,
+                                    onStreamToken = { stream -> _offlineBuildStreamPreview.value = stream }
+                                )
+                                appendConsoleLog(
+                                    level = ConsoleLogLevel.DEBUG,
+                                    tag = "OfflineAI",
+                                    message = "Local AI processed ${path.substringAfterLast('/')} in ${durationMs} ms",
+                                    filePath = path
+                                )
+                                OfflineApkBuildAndSignEngine.extractRepairedKotlinIfCleaner(targetFile, response)
+                            }.onFailure { err ->
+                                appendConsoleLog(
+                                    level = ConsoleLogLevel.WARN,
+                                    tag = "OfflineAI",
+                                    message = "Local AI repair skipped for $path: ${err.localizedMessage}",
+                                    filePath = path
+                                )
+                            }.getOrNull()
                         }
-                        if (repaired != null) {
-                            workingProject = workingProject.copy(
-                                files = workingProject.files.map { f -> if (f.path == targetFile.path) repaired else f }
+
+                        if (repairedFile == null && cloudProvider != null) {
+                            _offlineBuildProgress.value = "Cloud AI ($cloudProvider) repairing ${path.substringAfterLast('/')}…"
+                            appendConsoleLog(
+                                level = ConsoleLogLevel.INFO,
+                                tag = "CloudAI",
+                                message = "Invoking Cloud AI ($cloudProvider) to repair ${path}…",
+                                filePath = path
                             )
+                            val cloudRes = runCatching {
+                                refactorRepository.analyzeAndRefactorKotlinFile(
+                                    filePath = targetFile.path,
+                                    sourceCode = targetFile.content,
+                                    settings = currentSettings,
+                                    errorTrace = fileErrorTrace,
+                                    onStatusUpdate = { msg ->
+                                        _offlineBuildProgress.value = msg
+                                        _offlineBuildStreamPreview.value = "// $msg"
+                                    }
+                                )
+                            }.onFailure { err ->
+                                appendConsoleLog(
+                                    level = ConsoleLogLevel.WARN,
+                                    tag = "CloudAI",
+                                    message = "Cloud AI repair skipped for $path: ${err.localizedMessage}",
+                                    filePath = path
+                                )
+                            }.getOrNull()
+
+                            if (cloudRes != null && cloudRes.refactoredCode.isNotBlank() && cloudRes.refactoredCode != targetFile.content) {
+                                repairedFile = targetFile.copy(content = cloudRes.refactoredCode)
+                                appendConsoleLog(
+                                    level = ConsoleLogLevel.SUCCESS,
+                                    tag = "CloudAI",
+                                    message = "${cloudRes.modelUsed} repaired ${path.substringAfterLast('/')}",
+                                    filePath = path
+                                )
+                            }
+                        } else if (repairedFile != null) {
                             appendConsoleLog(
                                 level = ConsoleLogLevel.SUCCESS,
                                 tag = "OfflineAI",
-                                message = "MediaPipe LLM fixed compiler/Compose issues in ${targetFile.path}",
+                                message = "Local AI fixed issues in ${targetFile.path}",
                                 filePath = targetFile.path
+                            )
+                        }
+
+                        if (repairedFile != null) {
+                            workingProject = workingProject.copy(
+                                files = workingProject.files.map { f -> if (f.path == targetFile.path) repairedFile else f }
                             )
                         }
                     }
                     diagnostics = withContext(Dispatchers.Default) {
                         ProjectStaticAnalyzer.analyzeProject(workingProject)
                     }
-                } else if (offlineModelFile != null) {
+                } else if (offlineModelFile != null || cloudProvider != null) {
+                    val activeLabel = if (preferLocalAi && offlineModelFile != null) {
+                        "Local AI (${offlineModelFile.name})"
+                    } else {
+                        "Cloud AI ($cloudProvider)"
+                    }
                     appendConsoleLog(
                         level = ConsoleLogLevel.SUCCESS,
-                        tag = "OfflineAI",
-                        message = "MediaPipe LLM (${offlineModelFile.name}) ready — 0 compiler errors detected in Kotlin sources."
+                        tag = "AiBuilder",
+                        message = "$activeLabel ready — 0 compiler errors detected in Kotlin sources."
                     )
                 } else {
                     appendConsoleLog(
                         level = ConsoleLogLevel.INFO,
-                        tag = "OfflineAI",
-                        message = "On-device .task model not downloaded yet; synthesizing deterministic offline compilation & signing tasks. Download a local model in Settings for MediaPipe LLM customization."
+                        tag = "AiBuilder",
+                        message = "No Cloud API key or local .task model configured yet; synthesizing deterministic build & signing pipeline."
                     )
                 }
 
@@ -3557,6 +3655,74 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             app,
             "${app.packageName}.fileprovider",
             file
+        )
+    }
+
+    suspend fun saveOfflineSignedApkToDownloads(): com.example.data.storage.PublicDownloadResult {
+        val path = _offlineSigningStatus.value.signedApkPath
+            ?: return com.example.data.storage.PublicDownloadResult.Failed("No signed APK found yet.")
+        val file = File(path)
+        return saveFileToDownloadsWithFeedback(
+            sourceFile = file,
+            mimeType = "application/vnd.android.package-archive"
+        )
+    }
+
+    suspend fun saveProjectZipToDownloads(): com.example.data.storage.PublicDownloadResult {
+        val project = _activeProject.value
+            ?: return com.example.data.storage.PublicDownloadResult.Failed("No active project open.")
+        val zipFile = storageRepository.exportProjectToZipFile(project)
+        return saveFileToDownloadsWithFeedback(
+            sourceFile = zipFile,
+            mimeType = "application/zip"
+        )
+    }
+
+    private suspend fun saveFileToDownloadsWithFeedback(
+        sourceFile: File,
+        mimeType: String
+    ): com.example.data.storage.PublicDownloadResult {
+        val result = storageRepository.saveFileToPublicDownloads(sourceFile, mimeType)
+        when (result) {
+            is com.example.data.storage.PublicDownloadResult.Saved -> {
+                val sizeLabel = formatApkFileSize(sourceFile.length())
+                _snackbarMessage.value = "Saved to ${result.displayLocation} ($sizeLabel)"
+                appendConsoleLog(
+                    level = ConsoleLogLevel.SUCCESS,
+                    tag = "DownloadsExport",
+                    message = "Saved ${sourceFile.name} ($sizeLabel) to ${result.displayLocation}"
+                )
+            }
+            is com.example.data.storage.PublicDownloadResult.Failed -> {
+                _snackbarMessage.value = "Save failed: ${result.reason}"
+                appendConsoleLog(
+                    level = ConsoleLogLevel.ERROR,
+                    tag = "DownloadsExport",
+                    message = "Failed to save ${sourceFile.name}: ${result.reason}"
+                )
+            }
+            is com.example.data.storage.PublicDownloadResult.RequiresSafDocument -> Unit
+        }
+        return result
+    }
+
+    suspend fun completeSafDocumentSave(sourceFile: File, destinationUri: Uri): Boolean {
+        val result = storageRepository.copyFileToUri(sourceFile, destinationUri)
+        return result.fold(
+            onSuccess = { bytes ->
+                val sizeLabel = formatApkFileSize(bytes)
+                _snackbarMessage.value = "Saved ${sourceFile.name} ($sizeLabel)"
+                appendConsoleLog(
+                    level = ConsoleLogLevel.SUCCESS,
+                    tag = "DownloadsExport",
+                    message = "Saved ${sourceFile.name} ($sizeLabel) to selected location."
+                )
+                true
+            },
+            onFailure = { err ->
+                _snackbarMessage.value = "Save failed: ${err.localizedMessage ?: "Write error"}"
+                false
+            }
         )
     }
 

@@ -236,8 +236,8 @@ class OnDeviceMediaPipeGenerator(
         val savedModelPath = settings.localModelFilePath.trim()
         val modelFile = if (savedModelPath.isNotBlank()) File(savedModelPath) else File(context.filesDir, "models/built_in_coder.task")
 
-        if (!modelFile.exists() || !modelFile.canRead() || modelFile.length() <= 1024L * 1024L) {
-            throw IllegalStateException("Action Error: No valid Local AI model (.task) found on device. Please download a model in Settings -> Local AI or switch to Gemini Cloud API.")
+        if (!(modelFile.exists() && modelFile.canRead() && modelFile.length() > 1024L * 1024L)) {
+            throw IllegalStateException("Local AI model file (.task) is missing or incomplete. Please download a model in Settings -> Local AI or switch to Gemini Cloud API.")
         }
 
         onProgress(0, "Loading on-device GPU model (${modelFile.name})…")
@@ -330,7 +330,7 @@ class OnDeviceMediaPipeGenerator(
             )
         } catch (t: Throwable) {
             throw IllegalStateException(
-                "Local AI Inference Failed: ${t.localizedMessage ?: "Unsupported device runtime or corrupted model"}",
+                "On-device MediaPipe inference failed: ${t.localizedMessage ?: "Unsupported device runtime or corrupted model"}",
                 t
             )
         }

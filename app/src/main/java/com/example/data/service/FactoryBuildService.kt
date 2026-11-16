@@ -8,11 +8,14 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -120,26 +123,43 @@ class FactoryBuildService : Service() {
         const val ACTION_STOP = "com.example.action.STOP_FACTORY_SERVICE"
         const val EXTRA_TITLE = "extra_task_title"
 
+        @Volatile
+        private var isForegroundActive = false
+
+        @Volatile
+        private var pendingStopRequested = false
+
+        @Volatile
+        private var lastRequestedTitle: String = "AI Factory Task"
+
         fun startService(context: Context, title: String) {
+            lastRequestedTitle = title
+            pendingStopRequested = false
             val intent = Intent(context, FactoryBuildService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_TITLE, title)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            runCatching {
+                ContextCompat.startForegroundService(context, intent)
             }
         }
 
         fun stopService(context: Context) {
-            val intent = Intent(context, FactoryBuildService::class.java).apply {
-                action = ACTION_STOP
+            if (isForegroundActive) {
+                pendingStopRequested = false
+                val intent = Intent(context, FactoryBuildService::class.java).apply {
+                    action = ACTION_STOP
+                }
+                runCatching { context.stopService(intent) }
+            } else {
+                // Defer stopping until onCreate/onStartCommand has called startForeground()
+                // so Android never raises ForegroundServiceDidNotStartInTimeException.
+                pendingStopRequested = true
             }
-            context.stopService(intent)
         }
 
         fun updateNotification(context: Context, title: String, message: String, percent: Int) {
+            if (pendingStopRequested) return
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
             val notification = buildNotification(context, title, message, percent, isCompleted = false)
             notificationManager?.notify(NOTIFICATION_ID, notification)
@@ -239,9 +259,28 @@ class FactoryBuildService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun startForegroundCompat(notification: Notification) {
+        val foregroundType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        } else {
+            0
+        }
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundType)
+        isForegroundActive = true
+    }
+
     @SuppressLint("WakelockTimeout")
     override fun onCreate() {
         super.onCreate()
+        val initialNotification = buildNotification(
+            context = this,
+            title = "AI Factory Active",
+            message = "Executing $lastRequestedTitle in background…",
+            percent = 5,
+            isCompleted = false
+        )
+        startForegroundCompat(initialNotification)
+
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
             wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AiAppStudio::FactoryWakeLock")?.apply {
@@ -257,22 +296,33 @@ class FactoryBuildService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
-        val taskTitle = intent?.getStringExtra(EXTRA_TITLE) ?: "AI Factory Task"
+        val taskTitle = intent?.getStringExtra(EXTRA_TITLE) ?: lastRequestedTitle
 
-        if (action == ACTION_STOP) {
-            BackgroundTaskManager.cancelTask(this)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+        val notification = buildNotification(
+            context = this,
+            title = "AI Factory Active",
+            message = "Executing $taskTitle in background…",
+            percent = 15,
+            isCompleted = false
+        )
+        startForegroundCompat(notification)
+
+        if (action == ACTION_STOP || pendingStopRequested) {
+            pendingStopRequested = false
+            if (action == ACTION_STOP) {
+                BackgroundTaskManager.cancelTask(null)
+            }
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            isForegroundActive = false
+            stopSelf(startId)
             return START_NOT_STICKY
         }
-
-        val notification = buildNotification(this, "AI Factory Active", "Executing $taskTitle in background…", 15, isCompleted = false)
-        startForeground(NOTIFICATION_ID, notification)
 
         return START_STICKY
     }
 
     override fun onDestroy() {
+        isForegroundActive = false
         runCatching { wakeLock?.release() }
         runCatching { wifiLock?.release() }
         wakeLock = null

@@ -14,10 +14,10 @@ object AiCodeParser {
     }
 
     fun parse(rawOutput: String, defaultAppName: String = "Studio App", defaultPackage: String = "com.studio.app"): GeneratedProjectPayload {
-        val trimmed = rawOutput.trim()
-        if (trimmed.isBlank()) {
-            return buildGracefulFallbackPayload(defaultAppName, defaultPackage, "// Empty model response fallback")
+        if (rawOutput.isBlank()) {
+            throw IllegalStateException("AI returned an empty response. Check your API key, model selection, or internet connection.")
         }
+        val trimmed = rawOutput.trim()
 
         // Stage 1: JSON Extraction
         val jsonPayload = tryExtractJson(trimmed)
@@ -37,8 +37,7 @@ object AiCodeParser {
             return normalizePayload(heuristicPayload, defaultAppName, defaultPackage)
         }
 
-        // Stage 4: Graceful Fallback Wrapper (never throws; wraps partial snippets or prompts into a valid MainActivity)
-        return buildGracefulFallbackPayload(trimmed, defaultAppName, defaultPackage)
+        throw IllegalStateException("Failed to parse valid project files from AI response. Raw output preview: ${rawOutput.take(200)}")
     }
 
     private fun tryExtractJson(text: String): GeneratedProjectPayload? {
@@ -99,30 +98,37 @@ object AiCodeParser {
         var resolvedPackage = packageName
 
         for (match in matches) {
-            val content = match.groupValues[1].trim()
-            if (content.isBlank()) continue
+            val rawBlock = match.groupValues[1].trim()
+            if (rawBlock.isBlank()) continue
 
-            val pkgMatch = Regex("""^\s*package\s+([a-zA-Z0-9_.]+)""", RegexOption.MULTILINE).find(content)?.groupValues?.getOrNull(1)
-            if (pkgMatch != null) {
-                resolvedPackage = JsonProjectExtractor.sanitizePackageName(pkgMatch)
+            val splitSections = splitByFileMarkers(rawBlock)
+            for (content in splitSections) {
+                if (content.isBlank()) continue
+
+                val pkgMatch = Regex("""^\s*package\s+([a-zA-Z0-9_.]+)""", RegexOption.MULTILINE).find(content)?.groupValues?.getOrNull(1)
+                if (pkgMatch != null) {
+                    resolvedPackage = JsonProjectExtractor.sanitizePackageName(pkgMatch)
+                }
+                val resolvedPkgDir = resolvedPackage.replace('.', '/')
+
+                val fileMarkerMatch = Regex("""//\s*(?:FILE|Path):\s*([^\n]+)""", RegexOption.IGNORE_CASE).find(content)
+                val path = if (fileMarkerMatch != null) {
+                    fileMarkerMatch.groupValues[1].trim().removePrefix("/")
+                } else if (content.contains("activity_main.xml") || content.contains("<LinearLayout") || content.contains("<androidx.")) {
+                    "app/src/main/res/layout/activity_main.xml"
+                } else if (content.contains("strings.xml") || content.contains("<resources>")) {
+                    "app/src/main/res/values/strings.xml"
+                } else if (content.contains("build.gradle")) {
+                    "app/build.gradle.kts"
+                } else {
+                    "app/src/main/java/$resolvedPkgDir/MainActivity.kt"
+                }
+
+                val cleanContent = content.replace(Regex("""//\s*(?:FILE|Path):[^\n]+\n?""", RegexOption.IGNORE_CASE), "").trim()
+                if (cleanContent.isNotBlank()) {
+                    files.add(GeneratedFile(path = path, content = cleanContent))
+                }
             }
-            val resolvedPkgDir = resolvedPackage.replace('.', '/')
-
-            val fileMarkerMatch = Regex("""//\s*(?:FILE|Path):\s*([^\n]+)""", RegexOption.IGNORE_CASE).find(content)
-            val path = if (fileMarkerMatch != null) {
-                fileMarkerMatch.groupValues[1].trim().removePrefix("/")
-            } else if (content.contains("activity_main.xml") || content.contains("<LinearLayout") || content.contains("<androidx.")) {
-                "app/src/main/res/layout/activity_main.xml"
-            } else if (content.contains("strings.xml") || content.contains("<resources>")) {
-                "app/src/main/res/values/strings.xml"
-            } else if (content.contains("build.gradle")) {
-                "app/build.gradle.kts"
-            } else {
-                "app/src/main/java/$resolvedPkgDir/MainActivity.kt"
-            }
-
-            val cleanContent = content.replace(Regex("""//\s*(?:FILE|Path):[^\n]+\n?""""), "").trim()
-            files.add(GeneratedFile(path = path, content = cleanContent))
         }
 
         if (files.isEmpty()) return null
@@ -145,11 +151,16 @@ object AiCodeParser {
         if (!hasKeywords) return null
 
         val lines = text.lines()
-        val codeLines = lines.dropWhile { line ->
-            val l = line.trim()
-            l.startsWith("Here") || l.startsWith("Sure") || l.startsWith("Here is") ||
-                l.startsWith("Output") || l.startsWith("```") || l.isBlank()
-        }
+        val codeLines = lines
+            .dropWhile { line ->
+                val l = line.trim()
+                l.startsWith("Here") || l.startsWith("Sure") || l.startsWith("Here is") ||
+                    l.startsWith("Output") || l.startsWith("```") || l.isBlank()
+            }
+            .dropLastWhile { line ->
+                val l = line.trim()
+                l.startsWith("```") || l.isBlank()
+            }
 
         val codeContent = codeLines.joinToString("\n").trim()
         if (codeContent.isBlank()) return null
@@ -176,78 +187,10 @@ object AiCodeParser {
         )
     }
 
-    private fun buildGracefulFallbackPayload(rawText: String, appName: String, packageName: String): GeneratedProjectPayload {
-        val pkgDir = packageName.replace('.', '/')
-        val sanitizedSnippet = rawText.take(3000).replace("*/", "* /")
-        val wrappedCode = """
-package $packageName
-
-import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    Column(
-                        modifier = Modifier.fillMaxSize().padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "$appName",
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(16.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Icon(Icons.Default.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                    Text("Generated via Local AI", style = MaterialTheme.typography.titleMedium)
-                                }
-                                Text("Model output snippet:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(
-                                    text = "$sanitizedSnippet",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-        """.trimIndent()
-
-        return GeneratedProjectPayload(
-            appName = appName,
-            packageName = packageName,
-            files = listOf(
-                GeneratedFile(
-                    path = "app/src/main/java/$pkgDir/MainActivity.kt",
-                    content = wrappedCode
-                )
-            )
-        )
+    private fun splitByFileMarkers(block: String): List<String> {
+        val markerRegex = Regex("""(?=^//\s*(?:FILE|Path):\s*[^\n]+)""", setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE))
+        val parts = block.split(markerRegex).map { it.trim() }.filter { it.isNotBlank() }
+        return if (parts.isEmpty()) listOf(block) else parts
     }
 
     private fun normalizePayload(payload: GeneratedProjectPayload, defaultAppName: String, defaultPackage: String): GeneratedProjectPayload {
@@ -270,10 +213,17 @@ class MainActivity : ComponentActivity() {
             files = normalizedFiles
         )
 
+        val cleanSuggestions = payload.suggestions
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(4)
+
         return payload.copy(
             appName = resolvedAppName,
             packageName = resolvedPkg,
-            files = completeFiles
+            files = completeFiles,
+            suggestions = cleanSuggestions
         )
     }
 }

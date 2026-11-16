@@ -58,6 +58,7 @@ fun AppNavGraph(
     val settings by studioViewModel.settings.collectAsStateWithLifecycle()
     val projects by studioViewModel.projects.collectAsStateWithLifecycle()
     val generationState by studioViewModel.generationState.collectAsStateWithLifecycle()
+    val dynamicSuggestions by studioViewModel.dynamicSuggestions.collectAsStateWithLifecycle()
     val activeProject by studioViewModel.activeProject.collectAsStateWithLifecycle()
     val gitState by studioViewModel.gitState.collectAsStateWithLifecycle()
     val isGitBusy by studioViewModel.isGitBusy.collectAsStateWithLifecycle()
@@ -138,6 +139,7 @@ fun AppNavGraph(
                         settings = settings,
                         projects = projects,
                         generationState = generationState,
+                        dynamicSuggestions = dynamicSuggestions,
                         isImportingModel = isImportingModel,
                         deviceHardwareProfile = deviceHardwareProfile,
                         localModelDownloadState = localModelDownloadState,
@@ -253,7 +255,14 @@ fun AppNavGraph(
                             studioViewModel.signExternalApkOffline(uri, alias, pass, cn)
                         },
                         onGetOfflineSignedApkUri = { studioViewModel.getOfflineSignedApkInstallUri() },
+                        onSaveOfflineSignedApkToDownloads = { studioViewModel.saveOfflineSignedApkToDownloads() },
+                        onSaveCloudApkToDownloads = { studioViewModel.saveCloudApkToDownloads() },
+                        onGetCloudApkShareUri = { studioViewModel.getShareableCloudApkUri() },
                         onPackageZip = { studioViewModel.exportActiveProjectZip() },
+                        onSaveProjectZipToDownloads = { studioViewModel.saveProjectZipToDownloads() },
+                        onCompleteSafSave = { sourceFile, destUri ->
+                            studioViewModel.completeSafDocumentSave(sourceFile, destUri)
+                        },
                         onExportBuildLogs = { studioViewModel.exportBuildLogs() },
                         onInitGit = studioViewModel::initGitRepository,
                         onRefreshGit = { studioViewModel.refreshGitStatus() },

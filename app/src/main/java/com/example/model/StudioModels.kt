@@ -56,9 +56,9 @@ object OpenRouterModels {
     )
 
     val directGeminiFallbackChain = listOf(
+        "gemini-3.8-flash",
         "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash"
+        "gemini-2.5-pro"
     )
 
     fun shortDisplayName(modelId: String): String = when (modelId) {
@@ -87,7 +87,8 @@ data class GeneratedFile(
 data class GeneratedProjectPayload(
     val appName: String,
     val packageName: String = "com.generated.app",
-    val files: List<GeneratedFile> = emptyList()
+    val files: List<GeneratedFile> = emptyList(),
+    val suggestions: List<String> = emptyList()
 )
 
 @Immutable

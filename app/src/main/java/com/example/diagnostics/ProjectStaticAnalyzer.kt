@@ -389,43 +389,64 @@ object ProjectStaticAnalyzer {
                 }
 
                 val c = rawLine[i]
-                if (c == '"' && (i == 0 || rawLine[i - 1] != '\\')) {
-                    inSingleLineString = !inSingleLineString
+                if (inSingleLineString) {
+                    if (c == '\\') {
+                        i += 2
+                        continue
+                    }
+                    if (c == '"') {
+                        inSingleLineString = false
+                    }
                     i++
                     continue
                 }
 
-                if (!inSingleLineString) {
-                    when (c) {
-                        '{' -> braceStack.addLast(lineNum)
-                        '}' -> {
-                            if (braceStack.isEmpty()) {
-                                logs += ConsoleLogEntry(
-                                    id = UUID.randomUUID().toString(),
-                                    level = ConsoleLogLevel.ERROR,
-                                    tag = tag,
-                                    message = "$path:$lineNum: Syntax error: Unexpected closing brace '}' with no matching '{'.",
-                                    filePath = path,
-                                    lineNumber = lineNum
-                                )
-                            } else {
-                                braceStack.removeLast()
-                            }
+                if (c == '"') {
+                    inSingleLineString = true
+                    i++
+                    continue
+                }
+
+                // Skip Kotlin Char literals such as '{', '}', '"', '\'', '\\'
+                if (c == '\'' && i + 1 < rawLine.length) {
+                    if (rawLine[i + 1] == '\\' && i + 3 < rawLine.length && rawLine[i + 3] == '\'') {
+                        i += 4
+                        continue
+                    } else if (rawLine[i + 1] != '\\' && i + 2 < rawLine.length && rawLine[i + 2] == '\'') {
+                        i += 3
+                        continue
+                    }
+                }
+
+                when (c) {
+                    '{' -> braceStack.addLast(lineNum)
+                    '}' -> {
+                        if (braceStack.isEmpty()) {
+                            logs += ConsoleLogEntry(
+                                id = UUID.randomUUID().toString(),
+                                level = ConsoleLogLevel.ERROR,
+                                tag = tag,
+                                message = "$path:$lineNum: Syntax error: Unexpected closing brace '}' with no matching '{'.",
+                                filePath = path,
+                                lineNumber = lineNum
+                            )
+                        } else {
+                            braceStack.removeLast()
                         }
-                        '(' -> parenStack.addLast(lineNum)
-                        ')' -> {
-                            if (parenStack.isEmpty()) {
-                                logs += ConsoleLogEntry(
-                                    id = UUID.randomUUID().toString(),
-                                    level = ConsoleLogLevel.ERROR,
-                                    tag = tag,
-                                    message = "$path:$lineNum: Syntax error: Unexpected closing parenthesis ')' with no matching '('.",
-                                    filePath = path,
-                                    lineNumber = lineNum
-                                )
-                            } else {
-                                parenStack.removeLast()
-                            }
+                    }
+                    '(' -> parenStack.addLast(lineNum)
+                    ')' -> {
+                        if (parenStack.isEmpty()) {
+                            logs += ConsoleLogEntry(
+                                id = UUID.randomUUID().toString(),
+                                level = ConsoleLogLevel.ERROR,
+                                tag = tag,
+                                message = "$path:$lineNum: Syntax error: Unexpected closing parenthesis ')' with no matching '('.",
+                                filePath = path,
+                                lineNumber = lineNum
+                            )
+                        } else {
+                            parenStack.removeLast()
                         }
                     }
                 }

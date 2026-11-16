@@ -132,6 +132,7 @@ fun GeneratorScreen(
     settings: StudioSettings,
     projects: List<StudioProject>,
     generationState: GenerationUiState,
+    dynamicSuggestions: List<String> = emptyList(),
     isImportingModel: Boolean = false,
     deviceHardwareProfile: DeviceHardwareProfile = DeviceHardwareProfiler.buildProfile(8.0, 4.2),
     localModelDownloadState: LocalModelDownloadState = LocalModelDownloadState.Idle,
@@ -363,6 +364,71 @@ fun GeneratorScreen(
                             alertState = monthlyUsageAlert,
                             onOpenSettings = onOpenSettings
                         )
+                    }
+
+                    // Horizontally Scrollable Dynamic AI Follow-up Chips (or Default Quick-Start Pills when empty)
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("quick_start_pills_row"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp)
+                    ) {
+                        if (dynamicSuggestions.isNotEmpty()) {
+                            items(dynamicSuggestions.size) { index ->
+                                val suggestion = dynamicSuggestions[index]
+                                Surface(
+                                    onClick = { if (!isGenerating) promptText = suggestion },
+                                    shape = RoundedCornerShape(50),
+                                    color = palette.cardSurface,
+                                    border = BorderStroke(1.dp, palette.accentCyan.copy(alpha = 0.55f)),
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("dynamic_suggestion_chip_$index")
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.AutoAwesome,
+                                            contentDescription = null,
+                                            tint = palette.accentCyan,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = suggestion,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            items(quickStartSuggestionPills) { (pillLabel, fullPrompt) ->
+                                Surface(
+                                    onClick = { if (!isGenerating) promptText = fullPrompt },
+                                    shape = RoundedCornerShape(50),
+                                    color = palette.cardSurface,
+                                    border = BorderStroke(1.dp, palette.cardBorder),
+                                    modifier = Modifier.defaultMinSize(minHeight = 48.dp)
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                                    ) {
+                                        Text(
+                                            text = pillLabel,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Floating Prompt Input Card (24.dp radius + Cyber Gradient Border)
@@ -639,36 +705,6 @@ fun GeneratorScreen(
                                             )
                                         }
                                     }
-                                }
-                            }
-                        }
-                    }
-
-                    // Horizontally Scrollable Quick-Start Suggestion Pills
-                    LazyRow(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("quick_start_pills_row"),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        contentPadding = PaddingValues(horizontal = 2.dp)
-                    ) {
-                        items(quickStartSuggestionPills) { (pillLabel, fullPrompt) ->
-                            Surface(
-                                onClick = { if (!isGenerating) promptText = fullPrompt },
-                                shape = RoundedCornerShape(50),
-                                color = palette.cardSurface,
-                                border = BorderStroke(1.dp, palette.cardBorder),
-                                modifier = Modifier.defaultMinSize(minHeight = 48.dp)
-                            ) {
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                                ) {
-                                    Text(
-                                        text = pillLabel,
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
                                 }
                             }
                         }
