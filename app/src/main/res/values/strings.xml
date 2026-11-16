@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">AI App Studio</string>
+    <string name="studio_tagline">Kotlin &amp; Compose Generator</string>
+    <string name="nav_generator">Studio</string>
+    <string name="nav_workspace">Workspace</string>
+    <string name="settings_title">API &amp; GitHub Settings</string>
+    <string name="generate_app_cta">Generate App</string>
+    <string name="prompt_hint">Describe your Android app in English or Arabic…\ne.g. A habit tracker with daily streaks, dark cards, and Material 3 charts</string>
+    <string name="saved_projects_title">Saved Projects</string>
+    <string name="empty_projects_title">No generated projects yet</string>
+    <string name="empty_projects_subtitle">Configure your OpenRouter API key above, describe an app idea, and tap Generate App to build a complete Kotlin &amp; Compose project.</string>
+</resources>

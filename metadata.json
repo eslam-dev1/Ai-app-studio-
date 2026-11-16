@@ -1,0 +1,6 @@
+{
+  "name": "AI App Studio",
+  "description": "Generate native Kotlin & Jetpack Compose Android apps with OpenRouter AI, preview Composables live, manage Git commits, and build APKs via GitHub Actions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
