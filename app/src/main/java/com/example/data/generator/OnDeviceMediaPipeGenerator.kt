@@ -1,7 +1,6 @@
 package com.example.data.generator
 
 import android.content.Context
-import com.example.data.templates.StarterTemplateCatalog
 import com.example.model.StudioSettings
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
@@ -237,14 +236,14 @@ class OnDeviceMediaPipeGenerator(
         val savedModelPath = settings.localModelFilePath.trim()
         val modelFile = if (savedModelPath.isNotBlank()) File(savedModelPath) else File(context.filesDir, "models/built_in_coder.task")
 
+        if (!modelFile.exists() || !modelFile.canRead() || modelFile.length() <= 1024L * 1024L) {
+            throw IllegalStateException("Action Error: No valid Local AI model (.task) found on device. Please download a model in Settings -> Local AI or switch to Gemini Cloud API.")
+        }
+
         onProgress(0, "Loading on-device GPU model (${modelFile.name})…")
         currentCoroutineContext().ensureActive()
 
         try {
-            if (!modelFile.exists() || !modelFile.canRead()) {
-                throw IllegalStateException("Model file not found")
-            }
-
             val inference = getOrCreateInference(
                 savedModelPath = modelFile.absolutePath,
                 maxTokens = 2048,
@@ -330,19 +329,9 @@ class OnDeviceMediaPipeGenerator(
                 oom
             )
         } catch (t: Throwable) {
-            // Safe fallback mode for emulators/previews where native C++ JNI libraries are unavailable or inference fails
-            onProgress(1, "Using safe offline template generator (Turbo fallback mode)…")
-            val template = StarterTemplateCatalog.templates.firstOrNull { template ->
-                prompt.contains(template.title, ignoreCase = true) ||
-                template.includedFeatures.any { prompt.contains(it, ignoreCase = true) }
-            } ?: StarterTemplateCatalog.templates.first()
-
-            val appName = prompt.take(30).trim().ifBlank { "Local AI App" }
-            val packageName = "com.studio.app"
-            val payload = StarterTemplateCatalog.buildProjectPayload(template, appName, packageName)
-            GenerationResult(
-                payload = payload,
-                modelUsed = "MediaPipe (${modelFile.name} • Turbo Fallback)"
+            throw IllegalStateException(
+                "Local AI Inference Failed: ${t.localizedMessage ?: "Unsupported device runtime or corrupted model"}",
+                t
             )
         }
     }
