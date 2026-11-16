@@ -100,20 +100,68 @@ fun ApkBrandingStudioCard(
 
     var isExpanded by rememberSaveable(project.id) { mutableStateOf(false) }
 
+    val detectedVersionName = remember(project.files) {
+        val gradle = project.files.firstOrNull {
+            it.path.endsWith("app/build.gradle.kts") || it.path.endsWith("app/build.gradle")
+        }?.content.orEmpty()
+        Regex("""versionName\s*=?\s*["']([^"']+)["']""").find(gradle)?.groupValues?.getOrNull(1)
+            ?.ifBlank { null } ?: "1.0.0"
+    }
+
     var appName by remember(project.id, project.appName) { mutableStateOf(project.appName) }
     var packageId by remember(project.id, project.packageName) { mutableStateOf(project.packageName) }
-    var versionName by remember(project.id) { mutableStateOf("1.0.0") }
+    var versionName by remember(project.id, detectedVersionName) { mutableStateOf(detectedVersionName) }
 
     val iconPresets = remember {
         listOf(
-            LauncherIconPreset("rocket", "Rocket", Icons.Default.RocketLaunch, "ic_preset_rocket"),
-            LauncherIconPreset("sparkle", "AI Sparkle", Icons.Default.AutoAwesome, "ic_preset_sparkle"),
-            LauncherIconPreset("terminal", "Terminal", Icons.Default.Terminal, "ic_preset_terminal"),
-            LauncherIconPreset("code", "Code IDE", Icons.Default.Code, "ic_preset_code"),
-            LauncherIconPreset("store", "Commerce", Icons.Default.ShoppingBag, "ic_preset_store"),
-            LauncherIconPreset("game", "Game", Icons.Default.Gamepad, "ic_preset_game"),
-            LauncherIconPreset("palette", "Creative", Icons.Default.Palette, "ic_preset_palette"),
-            LauncherIconPreset("shield", "Security", Icons.Default.Security, "ic_preset_shield")
+            LauncherIconPreset(
+                id = "rocket",
+                name = "Rocket",
+                icon = Icons.Default.RocketLaunch,
+                vectorXml = buildAdaptiveVectorXml("#38BDF8", "M12,2.5C15.5,6 16.5,11 16.5,15L19,17.5L19,19.5L15,18.2L13.5,21H10.5L9,18.2L5,19.5V17.5L7.5,15C7.5,11 8.5,6 12,2.5ZM12,8.5A1.8,1.8 0 1,0 12,12.1A1.8,1.8 0 1,0 12,8.5Z")
+            ),
+            LauncherIconPreset(
+                id = "sparkle",
+                name = "AI Sparkle",
+                icon = Icons.Default.AutoAwesome,
+                vectorXml = buildAdaptiveVectorXml("#A855F7", "M12,2L14.4,8.6L21,11L14.4,13.4L12,20L9.6,13.4L3,11L9.6,8.6L12,2ZM19,3L19.9,5.1L22,6L19.9,6.9L19,9L18.1,6.9L16,6L18.1,5.1L19,3Z")
+            ),
+            LauncherIconPreset(
+                id = "terminal",
+                name = "Terminal",
+                icon = Icons.Default.Terminal,
+                vectorXml = buildAdaptiveVectorXml("#10B981", "M4,5H20A2,2 0 0,1 22,7V17A2,2 0 0,1 20,19H4A2,2 0 0,1 2,17V7A2,2 0 0,1 4,5ZM6.5,9L10.5,12L6.5,15L7.9,16.4L13.3,12L7.9,7.6L6.5,9ZM13,15V17H18V15H13Z")
+            ),
+            LauncherIconPreset(
+                id = "code",
+                name = "Code IDE",
+                icon = Icons.Default.Code,
+                vectorXml = buildAdaptiveVectorXml("#2563EB", "M9.4,16.6L4.8,12L9.4,7.4L8,6L2,12L8,18L9.4,16.6ZM14.6,16.6L19.2,12L14.6,7.4L16,6L22,12L16,18L14.6,16.6Z")
+            ),
+            LauncherIconPreset(
+                id = "store",
+                name = "Commerce",
+                icon = Icons.Default.ShoppingBag,
+                vectorXml = buildAdaptiveVectorXml("#F59E0B", "M18,6H16A4,4 0 0,0 8,6H6A2,2 0 0,0 4,8V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8A2,2 0 0,0 18,6ZM12,4A2,2 0 0,1 14,6H10A2,2 0 0,1 12,4ZM12,13A3,3 0 0,1 9,10H11A1,1 0 0,0 13,10H15A3,3 0 0,1 12,13Z")
+            ),
+            LauncherIconPreset(
+                id = "game",
+                name = "Game",
+                icon = Icons.Default.Gamepad,
+                vectorXml = buildAdaptiveVectorXml("#EC4899", "M7,6H17A5,5 0 0,1 22,11V15A3,3 0 0,1 16.6,16.8L14.8,14.5H9.2L7.4,16.8A3,3 0 0,1 2,15V11A5,5 0 0,1 7,6ZM6,10V12H8V14H10V12H12V10H10V8H8V10H6ZM16.5,9.5A1,1 0 1,0 16.5,11.5A1,1 0 1,0 16.5,9.5ZM18.5,11.5A1,1 0 1,0 18.5,13.5A1,1 0 1,0 18.5,11.5Z")
+            ),
+            LauncherIconPreset(
+                id = "palette",
+                name = "Creative",
+                icon = Icons.Default.Palette,
+                vectorXml = buildAdaptiveVectorXml("#06B6D4", "M12,3A9,9 0 0,0 3,12A9,9 0 0,0 12,21A1.5,1.5 0 0,0 13.5,19.5C13.5,19.1 13.3,18.7 13.1,18.4C12.8,18.1 12.7,17.8 12.7,17.4A1.5,1.5 0 0,1 14.2,15.9H16A5,5 0 0,0 21,10.9C21,6.5 17,3 12,3ZM6.5,12A1.5,1.5 0 1,1 8,10.5A1.5,1.5 0 0,1 6.5,12ZM9.5,8A1.5,1.5 0 1,1 11,6.5A1.5,1.5 0 0,1 9.5,8ZM14.5,8A1.5,1.5 0 1,1 16,6.5A1.5,1.5 0 0,1 14.5,8ZM17.5,12A1.5,1.5 0 1,1 19,10.5A1.5,1.5 0 0,1 17.5,12Z")
+            ),
+            LauncherIconPreset(
+                id = "shield",
+                name = "Security",
+                icon = Icons.Default.Security,
+                vectorXml = buildAdaptiveVectorXml("#6366F1", "M12,2L4,5.5V11.5C4,16.8 7.4,21.7 12,23C16.6,21.7 20,16.8 20,11.5V5.5L12,2ZM10.8,16.2L7,12.4L8.4,11L10.8,13.4L15.6,8.6L17,10L10.8,16.2Z")
+            )
         )
     }
 
@@ -365,4 +413,24 @@ private fun encodeUriToBase64(context: Context, uri: Uri): String? {
     } catch (_: Exception) {
         null
     }
+}
+
+private fun buildAdaptiveVectorXml(fillColorHex: String, pathData: String): String {
+    return """
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="24"
+            android:viewportHeight="24">
+            <group
+                android:scaleX="0.58"
+                android:scaleY="0.58"
+                android:pivotX="12"
+                android:pivotY="12">
+                <path
+                    android:fillColor="$fillColorHex"
+                    android:pathData="$pathData" />
+            </group>
+        </vector>
+    """.trimIndent()
 }

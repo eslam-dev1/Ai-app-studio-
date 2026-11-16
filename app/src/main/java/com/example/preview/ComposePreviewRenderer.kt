@@ -12,10 +12,12 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,27 +32,36 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RocketLaunch
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
@@ -58,6 +69,8 @@ import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -103,6 +116,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -158,11 +172,13 @@ fun LivePreviewDeviceFrame(
     }
     val stateStore = sharedStateStore ?: localStateStore
 
-    LaunchedEffect(composableInfo?.stateVars, refreshNonce) {
-        composableInfo?.stateVars?.forEach { v ->
-            val key = v.name
-            if (refreshNonce > 0 || !stateStore.containsKey(key)) {
-                stateStore[key] = v.initialValue
+    LaunchedEffect(allComposables, refreshNonce) {
+        allComposables.forEach { comp ->
+            comp.stateVars.forEach { v ->
+                val key = v.name
+                if (refreshNonce > 0 || !stateStore.containsKey(key)) {
+                    stateStore[key] = v.initialValue
+                }
             }
         }
     }
@@ -185,32 +201,36 @@ fun LivePreviewDeviceFrame(
         Density(density = parentDensity.density, fontScale = fontScale)
     }
 
-    val bezelRadius = if (isLandscape) 22.dp else 32.dp
-    val innerRadius = if (isLandscape) 18.dp else 27.dp
+    val bezelRadius = if (isLandscape) 22.dp else 30.dp
+    val innerRadius = if (isLandscape) 18.dp else 25.dp
     val statusVerticalPadding = if (isLandscape) 4.dp else 7.dp
 
-    CompositionLocalProvider(LocalDensity provides effectiveDensity) {
-        // Outer realistic device bezel
+    // Outer realistic device bezel (kept at parent density so hardware chrome doesn't distort)
+    Surface(
+        modifier = modifier
+            .border(
+                width = 3.5.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.72f),
+                shape = RoundedCornerShape(bezelRadius)
+            ),
+        shape = RoundedCornerShape(bezelRadius),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp
+    ) {
         Surface(
-            modifier = modifier
-                .border(
-                    width = 4.dp,
-                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
-                    shape = RoundedCornerShape(bezelRadius)
-                ),
-            shape = RoundedCornerShape(bezelRadius),
-            color = MaterialTheme.colorScheme.surfaceContainerHighest,
-            tonalElevation = 6.dp,
-            shadowElevation = 6.dp
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(5.dp),
+            shape = RoundedCornerShape(innerRadius),
+            color = previewColorScheme.background
         ) {
-            Surface(
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(5.dp),
-                shape = RoundedCornerShape(innerRadius),
-                color = previewColorScheme.background
+                    .clip(RoundedCornerShape(innerRadius))
+                    .clipToBounds()
             ) {
-                Column(modifier = Modifier.fillMaxSize()) {
                     // Simulated Phone Status Bar & Dynamic Camera Cutout
                     Row(
                         modifier = Modifier
@@ -289,85 +309,74 @@ fun LivePreviewDeviceFrame(
                     }
                 }
 
-                // Live Rendered Generated App Content
-                MaterialTheme(colorScheme = previewColorScheme) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .background(previewColorScheme.background)
-                    ) {
-                        when {
-                            !syntaxErrorMessage.isNullOrBlank() -> {
-                                PreviewErrorRecoveryCard(
-                                    title = "Preview Paused — Syntax Issue",
-                                    message = syntaxErrorMessage,
-                                    onFixWithAi = onFixWithAi
-                                )
-                            }
-                            composableInfo == null || composableInfo.rootNodes.isEmpty() -> {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(20.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Code,
-                                        contentDescription = null,
-                                        tint = previewColorScheme.primary,
-                                        modifier = Modifier.size(36.dp)
+                // Live Rendered Generated App Content (isolated fontScale + clipped screen bounds)
+                CompositionLocalProvider(LocalDensity provides effectiveDensity) {
+                    MaterialTheme(colorScheme = previewColorScheme) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .clipToBounds()
+                                .background(previewColorScheme.background)
+                        ) {
+                            when {
+                                !syntaxErrorMessage.isNullOrBlank() -> {
+                                    PreviewErrorRecoveryCard(
+                                        title = "Preview Paused — Syntax Issue",
+                                        message = syntaxErrorMessage,
+                                        onFixWithAi = onFixWithAi
                                     )
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    Text(
-                                        text = appName,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = previewColorScheme.onBackground,
-                                        textAlign = TextAlign.Center
-                                    )
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Text(
-                                        text = "Add or fix a @Composable screen function in Kotlin to render an interactive live preview.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = previewColorScheme.onSurfaceVariant,
-                                        textAlign = TextAlign.Center
-                                    )
-                                    if (onFixWithAi != null) {
-                                        Spacer(modifier = Modifier.height(14.dp))
-                                        Button(
-                                            onClick = onFixWithAi,
-                                            modifier = Modifier.testTag("preview_fix_with_ai_button")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.AutoFixHigh,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text("Fix with AI")
-                                        }
-                                    }
                                 }
-                            }
-                            else -> {
-                                val hasScaffold = composableInfo.rootNodes.any { it.name == "Scaffold" }
-                                if (hasScaffold) {
-                                    RenderNodes(
-                                        nodes = composableInfo.rootNodes,
-                                        allComposables = allComposables,
-                                        stateStore = stateStore,
-                                        loopVars = emptyMap(),
-                                        onAction = handleAction,
-                                        depth = 0
-                                    )
-                                } else {
+                                composableInfo == null || composableInfo.rootNodes.isEmpty() -> {
                                     Column(
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .verticalScroll(rememberScrollState())
-                                            .padding(4.dp)
+                                            .padding(20.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center
                                     ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Code,
+                                            contentDescription = null,
+                                            tint = previewColorScheme.primary,
+                                            modifier = Modifier.size(36.dp)
+                                        )
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        Text(
+                                            text = appName,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = previewColorScheme.onBackground,
+                                            textAlign = TextAlign.Center
+                                        )
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Text(
+                                            text = "Add or fix a @Composable screen function in Kotlin to render an interactive live preview.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = previewColorScheme.onSurfaceVariant,
+                                            textAlign = TextAlign.Center
+                                        )
+                                        if (onFixWithAi != null) {
+                                            Spacer(modifier = Modifier.height(14.dp))
+                                            Button(
+                                                onClick = onFixWithAi,
+                                                modifier = Modifier.testTag("preview_fix_with_ai_button")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.AutoFixHigh,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("Fix with AI")
+                                            }
+                                        }
+                                    }
+                                }
+                                else -> {
+                                    val rendersScaffold = remember(composableInfo, allComposables) {
+                                        containsScaffold(composableInfo.rootNodes, allComposables, depth = 0)
+                                    }
+                                    if (rendersScaffold) {
                                         RenderNodes(
                                             nodes = composableInfo.rootNodes,
                                             allComposables = allComposables,
@@ -376,6 +385,23 @@ fun LivePreviewDeviceFrame(
                                             onAction = handleAction,
                                             depth = 0
                                         )
+                                    } else {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .verticalScroll(rememberScrollState())
+                                                .padding(4.dp)
+                                        ) {
+                                            RenderNodes(
+                                                nodes = composableInfo.rootNodes,
+                                                allComposables = allComposables,
+                                                stateStore = stateStore,
+                                                loopVars = emptyMap(),
+                                                onAction = handleAction,
+                                                depth = 0,
+                                                columnScope = this
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -388,7 +414,7 @@ fun LivePreviewDeviceFrame(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(previewColorScheme.surface)
-                        .padding(vertical = 7.dp),
+                        .padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Box(
@@ -401,7 +427,6 @@ fun LivePreviewDeviceFrame(
                 }
             }
         }
-    }
     }
 }
 
@@ -447,7 +472,7 @@ private fun PreviewErrorRecoveryCard(
                     )
                 }
                 Text(
-                    text = "Issue detected — Auto-fixing with AI...",
+                    text = title,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onErrorContainer,
@@ -494,6 +519,26 @@ private fun PreviewErrorRecoveryCard(
     }
 }
 
+private fun containsScaffold(
+    nodes: List<ComposeNode>,
+    allComposables: List<PreviewComposableInfo>,
+    depth: Int
+): Boolean {
+    if (depth > 6) return false
+    for (node in nodes) {
+        if (node.name == "Scaffold") return true
+        if (containsScaffold(node.children, allComposables, depth + 1)) return true
+        if (node.branches.any { (_, branchNodes) -> containsScaffold(branchNodes, allComposables, depth + 1) }) {
+            return true
+        }
+        val custom = allComposables.firstOrNull { it.name == node.name }
+        if (custom != null && !node.name.endsWith("Theme") && containsScaffold(custom.rootNodes, allComposables, depth + 1)) {
+            return true
+        }
+    }
+    return false
+}
+
 @Composable
 private fun RenderNodes(
     nodes: List<ComposeNode>,
@@ -507,33 +552,97 @@ private fun RenderNodes(
 ) {
     if (depth > 8) return
     nodes.forEach { node ->
-        if (node.name == "__items__") {
-            node.listItems.forEach { itemValue ->
-                val childLoopVars = loopVars + (node.itemVarName to itemValue) + ("it" to itemValue)
+        when (node.name) {
+            "__items__" -> {
+                node.listItems.forEach { itemValue ->
+                    val childLoopVars = loopVars + (node.itemVarName to itemValue) + ("it" to itemValue)
+                    RenderNodes(
+                        nodes = node.children,
+                        allComposables = allComposables,
+                        stateStore = stateStore,
+                        loopVars = childLoopVars,
+                        onAction = onAction,
+                        depth = depth + 1,
+                        columnScope = columnScope,
+                        rowScope = rowScope
+                    )
+                }
+            }
+            "__when__" -> {
+                val activeBranchNodes = selectWhenBranch(
+                    subjectExpr = node.conditionExpr.orEmpty(),
+                    branches = node.branches,
+                    stateStore = stateStore
+                )
                 RenderNodes(
-                    nodes = node.children,
+                    nodes = activeBranchNodes,
                     allComposables = allComposables,
                     stateStore = stateStore,
-                    loopVars = childLoopVars,
+                    loopVars = loopVars,
                     onAction = onAction,
                     depth = depth + 1,
                     columnScope = columnScope,
                     rowScope = rowScope
                 )
             }
-        } else {
-            RenderNode(
-                node = node,
-                allComposables = allComposables,
-                stateStore = stateStore,
-                loopVars = loopVars,
-                onAction = onAction,
-                depth = depth,
-                columnScope = columnScope,
-                rowScope = rowScope
-            )
+            "__if__" -> {
+                val condExpr = node.conditionExpr
+                val evaluated = evaluateBooleanExpr(condExpr, stateStore)
+                val targetNodes = when (evaluated) {
+                    true -> node.branches.firstOrNull()?.second.orEmpty()
+                    false -> node.branches.firstOrNull { it.first == null }?.second.orEmpty()
+                    null -> {
+                        val elseNodes = node.branches.firstOrNull { it.first == null }?.second
+                        elseNodes ?: node.branches.firstOrNull()?.second.orEmpty()
+                    }
+                }
+                RenderNodes(
+                    nodes = targetNodes,
+                    allComposables = allComposables,
+                    stateStore = stateStore,
+                    loopVars = loopVars,
+                    onAction = onAction,
+                    depth = depth + 1,
+                    columnScope = columnScope,
+                    rowScope = rowScope
+                )
+            }
+            else -> {
+                RenderNode(
+                    node = node,
+                    allComposables = allComposables,
+                    stateStore = stateStore,
+                    loopVars = loopVars,
+                    onAction = onAction,
+                    depth = depth,
+                    columnScope = columnScope,
+                    rowScope = rowScope
+                )
+            }
         }
     }
+}
+
+private fun selectWhenBranch(
+    subjectExpr: String,
+    branches: List<Pair<String?, List<ComposeNode>>>,
+    stateStore: Map<String, Any>
+): List<ComposeNode> {
+    if (branches.isEmpty()) return emptyList()
+    val cleanSubject = subjectExpr.trim()
+    val currentVal = stateStore[cleanSubject]?.toString()
+    if (currentVal != null) {
+        val matched = branches.firstOrNull { (cond, _) ->
+            if (cond == null) return@firstOrNull false
+            cond.split(',').any { token ->
+                val cleanToken = token.trim().trim('"')
+                cleanToken == currentVal || cleanToken.substringAfterLast('.') == currentVal
+            }
+        }
+        if (matched != null) return matched.second
+        return branches.firstOrNull { it.first == null }?.second ?: branches.first().second
+    }
+    return branches.first().second
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -566,6 +675,7 @@ private fun RenderNode(
             Scaffold(
                 modifier = modifier.fillMaxSize(),
                 containerColor = containerColor,
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 topBar = {
                     if (topBarNodes.isNotEmpty()) {
                         RenderNodes(topBarNodes, allComposables, stateStore, loopVars, onAction, depth + 1)
@@ -582,13 +692,24 @@ private fun RenderNode(
                     }
                 }
             ) { innerPadding ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    RenderNodes(node.children, allComposables, stateStore, loopVars, onAction, depth + 1, columnScope = this)
+                val hasDirectLazy = node.children.any { it.name == "LazyColumn" || (it.name == "Box" && it.modifier.fillMaxSize) }
+                if (hasDirectLazy) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding)
+                    ) {
+                        RenderNodes(node.children, allComposables, stateStore, loopVars, onAction, depth + 1)
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        RenderNodes(node.children, allComposables, stateStore, loopVars, onAction, depth + 1, columnScope = this)
+                    }
                 }
             }
         }
@@ -605,6 +726,7 @@ private fun RenderNode(
                     title = { RenderNodes(titleNodes, allComposables, stateStore, loopVars, onAction, depth + 1) },
                     navigationIcon = { RenderNodes(navNodes, allComposables, stateStore, loopVars, onAction, depth + 1) },
                     actions = { RenderNodes(actionNodes, allComposables, stateStore, loopVars, onAction, depth + 1) },
+                    windowInsets = WindowInsets(0, 0, 0, 0),
                     colors = colors
                 )
             } else {
@@ -612,13 +734,17 @@ private fun RenderNode(
                     title = { RenderNodes(titleNodes, allComposables, stateStore, loopVars, onAction, depth + 1) },
                     navigationIcon = { RenderNodes(navNodes, allComposables, stateStore, loopVars, onAction, depth + 1) },
                     actions = { RenderNodes(actionNodes, allComposables, stateStore, loopVars, onAction, depth + 1) },
+                    windowInsets = WindowInsets(0, 0, 0, 0),
                     colors = colors
                 )
             }
         }
 
         "NavigationBar" -> {
-            NavigationBar(modifier = modifier) {
+            NavigationBar(
+                modifier = modifier,
+                windowInsets = WindowInsets(0, 0, 0, 0)
+            ) {
                 RenderNodes(node.children, allComposables, stateStore, loopVars, onAction, depth + 1, rowScope = this)
             }
         }
@@ -677,7 +803,7 @@ private fun RenderNode(
             val vArrangement = parseVerticalArrangement(node.namedArgs["verticalArrangement"])
             val hAlignment = parseHorizontalAlignment(node.namedArgs["horizontalAlignment"])
             LazyColumn(
-                modifier = modifier.height(340.dp),
+                modifier = modifier.heightIn(min = 160.dp, max = 420.dp),
                 contentPadding = PaddingValues(8.dp),
                 verticalArrangement = vArrangement,
                 horizontalAlignment = hAlignment
@@ -984,7 +1110,11 @@ private fun buildComposeModifier(
             m = with(rowScope) { m.weight(parsed.weight) }
         }
     }
-    parsed.clipCornerDp?.let { m = m.clip(RoundedCornerShape(it.dp)) }
+    if (parsed.isCircleClip) {
+        m = m.clip(CircleShape)
+    } else {
+        parsed.clipCornerDp?.let { m = m.clip(RoundedCornerShape(it.dp)) }
+    }
     ComposePreviewEngine.resolveColorExpr(parsed.backgroundColorExpr)?.let { color ->
         m = m.background(color)
     }
@@ -993,6 +1123,16 @@ private fun buildComposeModifier(
         m = m.padding(
             horizontal = (parsed.paddingHorizontalDp ?: 0f).dp,
             vertical = (parsed.paddingVerticalDp ?: 0f).dp
+        )
+    }
+    if (parsed.paddingStartDp != null || parsed.paddingTopDp != null ||
+        parsed.paddingEndDp != null || parsed.paddingBottomDp != null
+    ) {
+        m = m.padding(
+            start = (parsed.paddingStartDp ?: 0f).dp,
+            top = (parsed.paddingTopDp ?: 0f).dp,
+            end = (parsed.paddingEndDp ?: 0f).dp,
+            bottom = (parsed.paddingBottomDp ?: 0f).dp
         )
     }
     if (parsed.hasClickable) {
@@ -1192,19 +1332,24 @@ private fun resolveMaterialIcon(expr: String): ImageVector {
     return when (name) {
         "Add" -> Icons.Default.Add
         "Home" -> Icons.Default.Home
+        "Explore" -> Icons.Default.Explore
         "Settings" -> Icons.Default.Settings
         "Search" -> Icons.Default.Search
         "Delete" -> Icons.Default.Delete
         "Edit" -> Icons.Default.Edit
         "Check" -> Icons.Default.Check
         "CheckCircle" -> Icons.Default.CheckCircle
+        "Done" -> Icons.Default.Done
         "Close" -> Icons.Default.Close
         "Favorite" -> Icons.Default.Favorite
+        "Bookmark" -> Icons.Default.Bookmark
         "Star" -> Icons.Default.Star
         "Person" -> Icons.Default.Person
         "AccountCircle" -> Icons.Default.AccountCircle
         "Email" -> Icons.Default.Email
         "Lock" -> Icons.Default.Lock
+        "Visibility" -> Icons.Default.Visibility
+        "VisibilityOff" -> Icons.Default.VisibilityOff
         "Refresh" -> Icons.Default.Refresh
         "Send" -> Icons.AutoMirrored.Filled.Send
         "Share" -> Icons.Default.Share
@@ -1214,10 +1359,16 @@ private fun resolveMaterialIcon(expr: String): ImageVector {
         "Pause" -> Icons.Default.Pause
         "ShoppingCart" -> Icons.Default.ShoppingCart
         "Notifications" -> Icons.Default.Notifications
+        "CalendarToday" -> Icons.Default.CalendarToday
+        "Schedule" -> Icons.Default.Schedule
+        "History" -> Icons.Default.History
         "Info" -> Icons.Default.Info
         "Warning" -> Icons.Default.Warning
         "Build" -> Icons.Default.Build
         "Code" -> Icons.Default.Code
+        "Palette" -> Icons.Default.Palette
+        "DarkMode" -> Icons.Default.DarkMode
+        "LightMode" -> Icons.Default.LightMode
         "RocketLaunch" -> Icons.Default.RocketLaunch
         "SmartToy" -> Icons.Default.SmartToy
         "Folder" -> Icons.Default.Folder

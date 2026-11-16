@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Palette
@@ -49,9 +50,11 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -86,6 +89,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -121,8 +125,8 @@ import com.example.model.ConsoleLogLevel
 import com.example.model.EditorThemeMode
 import com.example.model.GeneratedFile
 import com.example.model.GitRepoState
+import com.example.model.OfflineSigningStatus
 import com.example.model.ProjectSnapshot
-import com.example.diagnostics.CodeQuickActionEngine
 import com.example.model.RefactorUiState
 import com.example.model.StudioProject
 import com.example.model.StudioSettings
@@ -163,6 +167,11 @@ fun WorkspaceScreen(
     isGitBusy: Boolean,
     isCloudBuildBusy: Boolean,
     cloudBuildProgress: String?,
+    isOfflineBuildBusy: Boolean = false,
+    offlineBuildProgress: String? = null,
+    offlineBuildStreamPreview: String = "",
+    offlineSigningStatus: OfflineSigningStatus = OfflineSigningStatus(),
+    isAutoFixingBuild: Boolean = false,
     onBack: () -> Unit,
     onOpenSettings: () -> Unit,
     onSaveFile: (path: String, content: String) -> Unit,
@@ -203,6 +212,13 @@ fun WorkspaceScreen(
     onDismissRefactorSheet: () -> Unit = {},
     onRunCompilerCheck: () -> Unit = {},
     onClearConsoleLogs: () -> Unit = {},
+    onAutoFixProject: () -> Unit = {},
+    onOptimizeProject: () -> Unit = {},
+    onFixBuildWithAi: () -> Unit = {},
+    onDownloadAndInstallApk: suspend () -> android.net.Uri? = { null },
+    onTriggerOfflineAiBuildAndSign: (keyAlias: String, storePassword: String, commonName: String) -> Unit = { _, _, _ -> },
+    onSignExternalApkOffline: suspend (apkUri: Uri, keyAlias: String, storePassword: String, commonName: String) -> Uri? = { _, _, _, _ -> null },
+    onGetOfflineSignedApkUri: () -> Uri? = { null },
     onPackageZip: suspend () -> android.net.Uri?,
     onExportBuildLogs: suspend () -> android.net.Uri?,
     onInitGit: () -> Unit,
@@ -525,19 +541,26 @@ fun WorkspaceScreen(
                                 isGitBusy = isGitBusy,
                                 isCloudBuildBusy = isCloudBuildBusy,
                                 cloudBuildProgress = cloudBuildProgress,
+                                isOfflineBuildBusy = isOfflineBuildBusy,
+                                offlineBuildProgress = offlineBuildProgress,
+                                offlineBuildStreamPreview = offlineBuildStreamPreview,
+                                offlineSigningStatus = offlineSigningStatus,
+                                isAutoFixingBuild = isAutoFixingBuild,
                                 onTriggerCloudBuild = onTriggerCloudBuild,
                                 onRefreshCloudBuildStatus = onRefreshCloudBuild,
+                                onDownloadAndInstallApk = onDownloadAndInstallApk,
+                                onTriggerOfflineAiBuildAndSign = onTriggerOfflineAiBuildAndSign,
+                                onSignExternalApkOffline = onSignExternalApkOffline,
+                                onGetOfflineSignedApkUri = onGetOfflineSignedApkUri,
                                 onPackageZip = onPackageZip,
                                 onExportBuildLogs = onExportBuildLogs,
-                                onAutoFixProject = {
-                                    val (fixedProj, fixes) = CodeQuickActionEngine.autoFixProject(project)
-                                    if (fixes.isNotEmpty()) {
-                                        fixedProj.files.forEach { f ->
-                                            onSaveFile(f.path, f.content)
-                                        }
-                                        onShowToast("⚡ Auto-fixed ${fixes.size} issue(s) across project files!")
-                                    } else {
-                                        onShowToast("✅ 0 issues found to auto-fix.")
+                                onAutoFixProject = onAutoFixProject,
+                                onOptimizeProject = onOptimizeProject,
+                                onFixBuildWithAi = onFixBuildWithAi,
+                                onNavigateToFile = { filePath, _ ->
+                                    if (project.files.any { it.path == filePath }) {
+                                        requestedFileToOpen = filePath
+                                        selectedTabIndex = WorkspaceBottomTab.CODE.ordinal
                                     }
                                 },
                                 onSaveBranding = onUpdateBranding,
@@ -1220,6 +1243,8 @@ private fun WorkspaceLivePreviewTab(
     val palette = LocalStudioCyberPalette.current
     var darkPreview by rememberSaveable(project.id) { mutableStateOf(true) }
     var isCompactPhone by rememberSaveable(project.id) { mutableStateOf(true) }
+    var isLandscape by rememberSaveable(project.id) { mutableStateOf(false) }
+    var previewFontScale by rememberSaveable(project.id) { mutableFloatStateOf(1.0f) }
     var selectedComposableName by rememberSaveable(project.id) { mutableStateOf<String?>(null) }
     var showQuickEditor by rememberSaveable(project.id) { mutableStateOf(false) }
     var refreshNonce by rememberSaveable(project.id) { mutableIntStateOf(0) }
@@ -1313,14 +1338,15 @@ private fun WorkspaceLivePreviewTab(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = palette.accentPurple
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Syntax issue detected",
+                            tint = Color(0xFFF59E0B),
+                            modifier = Modifier.size(20.dp)
                         )
                         Column {
                             Text(
-                                text = "Issue detected — Auto-fixing with AI...",
+                                text = "Syntax Issue Detected",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = palette.accentCyan
@@ -1346,7 +1372,7 @@ private fun WorkspaceLivePreviewTab(
                             contentColor = Color(0xFF031018)
                         ),
                         modifier = Modifier
-                            .defaultMinSize(minHeight = 36.dp)
+                            .defaultMinSize(minHeight = 48.dp)
                             .testTag("preview_fix_with_ai_button")
                     ) {
                         Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(14.dp))
@@ -1434,6 +1460,31 @@ private fun WorkspaceLivePreviewTab(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            FilterChip(
+                selected = isLandscape,
+                onClick = { isLandscape = !isLandscape },
+                label = { Text(if (isLandscape) "Landscape" else "Portrait") },
+                leadingIcon = {
+                    Icon(Icons.Default.ScreenRotation, contentDescription = "Rotate preview device", modifier = Modifier.size(16.dp))
+                },
+                modifier = Modifier.testTag("live_preview_rotate_toggle")
+            )
+
+            AssistChip(
+                onClick = {
+                    previewFontScale = when (previewFontScale) {
+                        1.0f -> 1.15f
+                        1.15f -> 0.85f
+                        else -> 1.0f
+                    }
+                },
+                label = { Text("${previewFontScale}x") },
+                leadingIcon = {
+                    Icon(Icons.Default.FormatSize, contentDescription = "Cycle preview font scale", modifier = Modifier.size(16.dp))
+                },
+                modifier = Modifier.testTag("live_preview_font_scale_button")
+            )
+
             AssistChip(
                 onClick = { showThemePickerDialog = true },
                 label = { Text("M3 Theme") },
@@ -1507,11 +1558,26 @@ private fun WorkspaceLivePreviewTab(
                 .fillMaxWidth(),
             contentAlignment = Alignment.Center
         ) {
-            val desiredWidth = if (isCompactPhone) 310.dp else 404.dp
-            val clampedTargetWidth = desiredWidth.coerceAtMost((maxWidth - 12.dp).coerceAtLeast(240.dp))
+            val availableWidth = (maxWidth - 8.dp).coerceAtLeast(180.dp)
+            val availableHeight = (maxHeight - 4.dp).coerceAtLeast(140.dp)
+            val targetPhoneWidth = if (isLandscape) {
+                (if (isCompactPhone) 540.dp else 660.dp).coerceAtLeast(240.dp).coerceAtMost(availableWidth)
+            } else {
+                (if (isCompactPhone) 300.dp else 404.dp).coerceAtLeast(220.dp).coerceAtMost(availableWidth)
+            }
+            val targetPhoneHeight = if (isLandscape) {
+                (targetPhoneWidth * 0.58f).coerceAtLeast(140.dp).coerceAtMost(availableHeight)
+            } else {
+                availableHeight.coerceAtMost(if (isCompactPhone) 640.dp else 760.dp)
+            }
+
             val animatedPhoneWidth by animateDpAsState(
-                targetValue = clampedTargetWidth,
+                targetValue = targetPhoneWidth,
                 label = "preview_phone_width"
+            )
+            val animatedPhoneHeight by animateDpAsState(
+                targetValue = targetPhoneHeight,
+                label = "preview_phone_height"
             )
 
             LivePreviewDeviceFrame(
@@ -1539,9 +1605,11 @@ private fun WorkspaceLivePreviewTab(
                 },
                 refreshNonce = refreshNonce,
                 sharedStateStore = previewStateStore,
+                fontScale = previewFontScale,
+                isLandscape = isLandscape,
                 modifier = Modifier
-                    .fillMaxHeight()
                     .width(animatedPhoneWidth)
+                    .height(animatedPhoneHeight)
                     .testTag("live_preview_frame")
             )
         }

@@ -150,7 +150,8 @@ object ProjectStaticAnalyzer {
         }
         return when {
             path.endsWith(".kt", ignoreCase = true) -> analyzeKotlinFile(path, content)
-            path.endsWith(".gradle.kts", ignoreCase = true) -> analyzeGradleKtsFile(path, content)
+            path.endsWith(".gradle.kts", ignoreCase = true) ||
+                path.endsWith(".gradle", ignoreCase = true) -> analyzeGradleKtsFile(path, content)
             path.endsWith("AndroidManifest.xml", ignoreCase = true) -> analyzeManifestXml(path, content)
             path.endsWith(".xml", ignoreCase = true) -> analyzeGenericXml(path, content)
             else -> emptyList()
@@ -235,7 +236,7 @@ object ProjectStaticAnalyzer {
 
         logs.addAll(checkBalancedDelimiters(path, lines, tag = "GradleCompiler"))
 
-        if (path.endsWith("app/build.gradle.kts")) {
+        if (path.endsWith("app/build.gradle.kts") || path.endsWith("app/build.gradle")) {
             if (!content.contains("namespace")) {
                 logs += ConsoleLogEntry(
                     id = UUID.randomUUID().toString(),
@@ -251,7 +252,7 @@ object ProjectStaticAnalyzer {
                     id = UUID.randomUUID().toString(),
                     level = ConsoleLogLevel.ERROR,
                     tag = "GradleCompiler",
-                    message = "$path:1: Missing 'compileSdk' configuration in app/build.gradle.kts.",
+                    message = "$path:1: Missing 'compileSdk' configuration in app/build.gradle.",
                     filePath = path,
                     lineNumber = 1
                 )
@@ -307,6 +308,7 @@ object ProjectStaticAnalyzer {
                 filePath = path,
                 lineNumber = 1
             )
+            return logs
         } else if (!trimmed.startsWith("<")) {
             logs += ConsoleLogEntry(
                 id = UUID.randomUUID().toString(),
@@ -316,6 +318,22 @@ object ProjectStaticAnalyzer {
                 filePath = path,
                 lineNumber = 1
             )
+            return logs
+        }
+
+        // Detect unescaped ampersands in XML resources (breaks AAPT2 compilation)
+        val unescapedAmp = Regex("&(?!amp;|lt;|gt;|quot;|apos;|#\\d+;|#x[0-9a-fA-F]+;)")
+        content.lines().forEachIndexed { idx, line ->
+            if (unescapedAmp.containsMatchIn(line)) {
+                logs += ConsoleLogEntry(
+                    id = UUID.randomUUID().toString(),
+                    level = ConsoleLogLevel.ERROR,
+                    tag = "Aapt2Resource",
+                    message = "$path:${idx + 1}: Unescaped '&' in XML — replace with '&amp;' before AAPT2 packaging.",
+                    filePath = path,
+                    lineNumber = idx + 1
+                )
+            }
         }
         return logs
     }

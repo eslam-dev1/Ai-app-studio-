@@ -1635,7 +1635,706 @@ class StudioCoreUnitTest {
         assertFalse(cancelledState.isBusy)
         assertEquals("Cancelled", cancelledState.message)
     }
+
+    @Test
+    fun codeQuickActionEngine_apkMetricsUsesRealCountsWithoutFakeFloors() {
+        val minimalProject = com.example.model.StudioProject(
+            id = "proj-real-metrics",
+            appName = "RealMetrics",
+            packageName = "com.example.realmetrics",
+            prompt = "Minimal helper library",
+            files = listOf(
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/java/com/example/realmetrics/Helper.kt",
+                    content = "package com.example.realmetrics\nclass Helper { fun ping() = 1 }"
+                ),
+                com.example.model.GeneratedFile(
+                    path = "app/build.gradle.kts",
+                    content = """
+                        dependencies {
+                            implementation(libs.androidx.core.ktx)
+                        }
+                    """.trimIndent()
+                )
+            )
+        )
+
+        val metrics = com.example.diagnostics.CodeQuickActionEngine.analyzeApkMetrics(minimalProject)
+        assertTrue(metrics.declaredPermissions.isEmpty())
+        assertEquals(1, metrics.gradleDependenciesCount)
+        assertEquals(0, metrics.composableCount)
+        assertEquals(100, metrics.dexPercentage + metrics.resPercentage + metrics.assetsPercentage)
+    }
+
+    @Test
+    fun codeQuickActionEngine_applyOptimizationsUsesValidNamedItemsSyntax() {
+        val sample = """
+            package com.example.list
+
+            import androidx.compose.foundation.lazy.LazyColumn
+            import androidx.compose.foundation.lazy.items
+            import androidx.compose.material3.Text
+            import androidx.compose.runtime.Composable
+
+            @Composable
+            fun Feed(entries: List<String>) {
+                LazyColumn {
+                    items(entries) { entry ->
+                        Text(entry)
+                    }
+                    items(count = 5) { idx ->
+                        Text("Header ${'$'}idx")
+                    }
+                }
+            }
+        """.trimIndent()
+
+        val (optimized, fixes) = com.example.diagnostics.CodeQuickActionEngine.applyOptimizations(
+            path = "app/src/main/java/com/example/list/Feed.kt",
+            code = sample
+        )
+
+        assertTrue(fixes.isNotEmpty())
+        assertFalse(optimized.contains("items(key ="))
+        assertTrue(optimized.contains("items(items = entries, key = { it.hashCode() })"))
+        assertTrue(optimized.contains("items(count = 5, key = { it })"))
+    }
+
+    @Test
+    fun codeQuickActionEngine_autoFixIgnoresBracesInStringsCommentsAndAddsSpAndTextImports() {
+        val code = """
+            package com.example.textui
+
+            @Composable
+            fun Banner() {
+                // brace { in comment should not unbalance
+                val pattern = "{ template }"
+                Text(
+                    text = pattern,
+                    fontSize = 18.sp,
+                    textAlign = TextAlign.Center,
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle.Default
+                )
+            }
+        """.trimIndent()
+
+        val (fixed, _) = com.example.diagnostics.CodeQuickActionEngine.autoFixKotlinCode(
+            path = "app/src/main/java/com/example/textui/Banner.kt",
+            code = code
+        )
+
+        assertTrue(fixed.contains("import androidx.compose.ui.unit.sp"))
+        assertTrue(fixed.contains("import androidx.compose.ui.text.style.TextAlign"))
+        assertTrue(fixed.contains("import androidx.compose.ui.text.style.TextOverflow"))
+        assertTrue(fixed.contains("import androidx.compose.ui.text.TextStyle"))
+        assertFalse("Must not append spurious closing brace", fixed.trimEnd().endsWith("}\n}"))
+    }
+
+    @Test
+    fun gitHubBuildRepository_pushesProjectInSingleAtomicGitDataCommit() = runBlocking {
+        var putFileCalls = 0
+        var blobCalls = 0
+        var treeCalls = 0
+        var commitCalls = 0
+        var refUpdateCalls = 0
+        var listRunsCalls = 0
+        var createdTreeEntriesCount = 0
+
+        val fakeApi = object : com.example.data.remote.GitHubApi {
+            override suspend fun getAuthenticatedUser(
+                authorization: String,
+                accept: String
+            ) = com.example.data.remote.GitHubUserResponse(login = "devuser", name = "Dev")
+
+            override suspend fun createRepository(
+                authorization: String,
+                accept: String,
+                request: com.example.data.remote.CreateRepoRequest
+            ) = com.example.data.remote.GitHubRepoResponse(
+                id = 101L,
+                name = request.name,
+                fullName = "devuser/${request.name}",
+                htmlUrl = "https://github.com/devuser/${request.name}",
+                cloneUrl = "https://github.com/devuser/${request.name}.git",
+                defaultBranch = "main"
+            )
+
+            override suspend fun getGitRef(
+                authorization: String,
+                owner: String,
+                repo: String,
+                ref: String,
+                accept: String
+            ) = com.example.data.remote.GitRefResponse(
+                ref = "refs/$ref",
+                objectInfo = com.example.data.remote.GitRefObject(sha = "head-sha-001", type = "commit")
+            )
+
+            override suspend fun getGitCommit(
+                authorization: String,
+                owner: String,
+                repo: String,
+                commitSha: String,
+                accept: String
+            ) = com.example.data.remote.GitCommitResponse(
+                sha = commitSha,
+                tree = com.example.data.remote.GitTreeRef(sha = "base-tree-sha-001")
+            )
+
+            override suspend fun createGitBlob(
+                authorization: String,
+                owner: String,
+                repo: String,
+                request: com.example.data.remote.CreateGitBlobRequest,
+                accept: String
+            ): com.example.data.remote.CreateGitBlobResponse {
+                blobCalls++
+                return com.example.data.remote.CreateGitBlobResponse(sha = "blob-sha-$blobCalls")
+            }
+
+            override suspend fun createGitTree(
+                authorization: String,
+                owner: String,
+                repo: String,
+                request: com.example.data.remote.CreateGitTreeRequest,
+                accept: String
+            ): com.example.data.remote.CreateGitTreeResponse {
+                treeCalls++
+                createdTreeEntriesCount = request.tree.size
+                return com.example.data.remote.CreateGitTreeResponse(sha = "new-tree-sha-002")
+            }
+
+            override suspend fun createGitCommit(
+                authorization: String,
+                owner: String,
+                repo: String,
+                request: com.example.data.remote.CreateGitCommitRequest,
+                accept: String
+            ): com.example.data.remote.CreateGitCommitResponse {
+                commitCalls++
+                return com.example.data.remote.CreateGitCommitResponse(sha = "new-commit-sha-003")
+            }
+
+            override suspend fun updateGitRef(
+                authorization: String,
+                owner: String,
+                repo: String,
+                ref: String,
+                request: com.example.data.remote.UpdateGitRefRequest,
+                accept: String
+            ): com.example.data.remote.GitRefResponse {
+                refUpdateCalls++
+                return com.example.data.remote.GitRefResponse(
+                    ref = "refs/$ref",
+                    objectInfo = com.example.data.remote.GitRefObject(sha = request.sha, type = "commit")
+                )
+            }
+
+            override suspend fun getFileContent(
+                authorization: String,
+                owner: String,
+                repo: String,
+                path: String,
+                branch: String,
+                accept: String
+            ): com.example.data.remote.GitHubContentGetResponse {
+                throw IllegalStateException("Should not call Contents API when atomic push succeeds")
+            }
+
+            override suspend fun putFileContent(
+                authorization: String,
+                owner: String,
+                repo: String,
+                path: String,
+                request: com.example.data.remote.PutContentRequest,
+                accept: String
+            ): com.example.data.remote.PutContentResponse {
+                putFileCalls++
+                return com.example.data.remote.PutContentResponse()
+            }
+
+            override suspend fun listWorkflowRuns(
+                authorization: String,
+                owner: String,
+                repo: String,
+                perPage: Int,
+                accept: String
+            ): com.example.data.remote.WorkflowRunsResponse {
+                listRunsCalls++
+                val runs = if (listRunsCalls >= 2) {
+                    listOf(
+                        com.example.data.remote.WorkflowRun(
+                            id = 777L,
+                            name = "Build APK",
+                            status = "queued",
+                            conclusion = null,
+                            htmlUrl = "https://github.com/$owner/$repo/actions/runs/777"
+                        )
+                    )
+                } else {
+                    emptyList()
+                }
+                return com.example.data.remote.WorkflowRunsResponse(
+                    totalCount = runs.size,
+                    workflowRuns = runs
+                )
+            }
+
+            override suspend fun listRunArtifacts(
+                authorization: String,
+                owner: String,
+                repo: String,
+                runId: Long,
+                accept: String
+            ) = com.example.data.remote.ArtifactsResponse()
+
+            override suspend fun listWorkflowRunJobs(
+                authorization: String,
+                owner: String,
+                repo: String,
+                runId: Long,
+                accept: String
+            ) = com.example.data.remote.WorkflowJobsResponse()
+
+            override suspend fun downloadArtifactZip(
+                authorization: String,
+                owner: String,
+                repo: String,
+                artifactId: Long,
+                accept: String
+            ): okhttp3.ResponseBody {
+                return okhttp3.ResponseBody.create(null, ByteArray(0))
+            }
+        }
+
+        val repo = com.example.data.github.GitHubBuildRepository(customApi = fakeApi)
+        val project = com.example.model.StudioProject(
+            id = "atomic-sync-test",
+            appName = "AtomicApp",
+            packageName = "com.example.atomic",
+            prompt = "Build atomic app",
+            gitHubRepoOwner = "devuser",
+            gitHubRepoName = "atomic-repo",
+            files = listOf(
+                com.example.model.GeneratedFile("app/src/main/java/com/example/atomic/MainActivity.kt", "package com.example.atomic\nclass MainActivity"),
+                com.example.model.GeneratedFile("app/build.gradle.kts", "android { namespace = \"com.example.atomic\" }")
+            )
+        )
+
+        val result = repo.pushProjectAndTriggerApkBuild(
+            project = project,
+            pat = "ghp_testtoken123",
+            preferredUsername = "devuser",
+            onProgress = {}
+        )
+
+        assertEquals(0, putFileCalls)
+        assertTrue(blobCalls >= 2)
+        assertEquals(blobCalls, createdTreeEntriesCount)
+        assertEquals(1, treeCalls)
+        assertEquals(1, commitCalls)
+        assertEquals(1, refUpdateCalls)
+        assertEquals(777L, result.workflowRunId)
+        assertEquals("Queued on GitHub Actions runner…", result.buildStatus)
+    }
+
+    @Test
+    fun projectStaticAnalyzer_validatesGroovyGradleAndUnescapedXmlAmpersand() {
+        val project = com.example.model.StudioProject(
+            id = "static-check-xml-gradle",
+            appName = "Checks",
+            packageName = "com.example.checks",
+            prompt = "Test analyzer",
+            files = listOf(
+                com.example.model.GeneratedFile(
+                    path = "app/build.gradle",
+                    content = "android { compileSdk 36 }" // missing namespace
+                ),
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/res/values/strings.xml",
+                    content = "<resources><string name=\"app_name\">Tom & Jerry</string></resources>"
+                ),
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/AndroidManifest.xml",
+                    content = "<manifest><application><activity android:name=\".MainActivity\"/></application></manifest>"
+                ),
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/java/com/example/checks/MainActivity.kt",
+                    content = "package com.example.checks\nimport androidx.compose.runtime.Composable\n@Composable fun App() {}"
+                )
+            )
+        )
+
+        val entries = com.example.diagnostics.ProjectStaticAnalyzer.analyzeProject(project)
+        assertTrue(entries.any { it.level == com.example.model.ConsoleLogLevel.ERROR && it.message.contains("namespace") })
+        assertTrue(entries.any { it.level == com.example.model.ConsoleLogLevel.ERROR && it.message.contains("Unescaped '&'") })
+    }
+
+    @Test
+    fun offlineApkSigner_generatesValidPkcs12KeystoreAndReloadsWithFingerprint() {
+        val artifact = com.example.data.build.OfflineApkBuildAndSignEngine.generatePkcs12Keystore(
+            keyAlias = "offline_rel",
+            storePassword = "strong-offline-pass",
+            commonName = "Studio Offline Builder"
+        )
+
+        assertEquals("offline_rel", artifact.keyAlias)
+        assertEquals("strong-offline-pass", artifact.storePassword)
+        assertEquals("Studio Offline Builder", artifact.commonName)
+        assertTrue(artifact.keystoreBytes.isNotEmpty())
+        assertTrue(artifact.sha256Fingerprint.matches(Regex("^([0-9A-F]{2}:){31}[0-9A-F]{2}$")))
+        assertTrue(artifact.certificate.subjectX500Principal.name.contains("CN=Studio Offline Builder"))
+
+        val reloaded = com.example.data.build.OfflineApkBuildAndSignEngine.loadPkcs12Keystore(
+            keystoreBytes = artifact.keystoreBytes,
+            keyAlias = "offline_rel",
+            storePassword = "strong-offline-pass"
+        )
+        assertNotNull(reloaded)
+        assertEquals(artifact.sha256Fingerprint, reloaded!!.sha256Fingerprint)
+        assertEquals("offline_rel", reloaded.keyAlias)
+    }
+
+    @Test
+    fun offlineApkSigner_injectsKeystorePropsGradleSigningConfigsAndScriptIdempotently() {
+        val project = com.example.model.StudioProject(
+            id = "offline-sign-config-test",
+            appName = "Offline Demo",
+            packageName = "com.example.offlinedemo",
+            prompt = "Offline test app",
+            files = listOf(
+                com.example.model.GeneratedFile(
+                    path = "app/build.gradle.kts",
+                    content = """
+                        plugins {
+                            id("com.android.application")
+                        }
+                        android {
+                            namespace = "com.example.offlinedemo"
+                            compileSdk = 36
+                            buildTypes {
+                                release {
+                                    isMinifyEnabled = false
+                                }
+                            }
+                        }
+                    """.trimIndent()
+                ),
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/java/com/example/offlinedemo/MainActivity.kt",
+                    content = "package com.example.offlinedemo\nclass MainActivity"
+                )
+            )
+        )
+
+        val firstPass = com.example.data.build.OfflineApkBuildAndSignEngine.applyOfflineSigningConfigToProject(
+            project = project,
+            keyAlias = "release",
+            storePassword = "studio-offline-sign",
+            commonName = "Offline Demo"
+        )
+
+        val updatedFiles = firstPass.updatedProject.files.associateBy { it.path }
+        assertTrue(updatedFiles.containsKey(com.example.data.build.OfflineApkBuildAndSignEngine.KEYSTORE_PROJECT_PATH))
+        assertTrue(updatedFiles.containsKey(com.example.data.build.OfflineApkBuildAndSignEngine.KEYSTORE_PROPS_PATH))
+        assertTrue(updatedFiles.containsKey(com.example.data.build.OfflineApkBuildAndSignEngine.OFFLINE_BUILD_SCRIPT_PATH))
+
+        val gradleContent = updatedFiles.getValue("app/build.gradle.kts").content
+        assertTrue(gradleContent.contains("signingConfigs"))
+        assertTrue(gradleContent.contains("signing-release.p12"))
+        assertTrue(gradleContent.contains("signingConfig = signingConfigs.getByName(\"release\")"))
+
+        // Second pass should reuse existing keystore and avoid duplicate signingConfigs injection
+        val secondPass = com.example.data.build.OfflineApkBuildAndSignEngine.applyOfflineSigningConfigToProject(
+            project = firstPass.updatedProject,
+            keyAlias = "release",
+            storePassword = "studio-offline-sign",
+            commonName = "Offline Demo"
+        )
+        assertEquals(firstPass.keystoreInfo.sha256Fingerprint, secondPass.keystoreInfo.sha256Fingerprint)
+        val secondGradle = secondPass.updatedProject.files.first { it.path == "app/build.gradle.kts" }.content
+        assertEquals(gradleContent, secondGradle)
+    }
+
+    @Test
+    fun offlineApkSigner_signsApkWithV1V2V3AndVerifiesCryptographically() {
+        val tempDir = Files.createTempDirectory("apksig_offline_test").toFile()
+        try {
+            val unsignedApk = File(tempDir, "app-release-unsigned.apk")
+            val signedApk = File(tempDir, "app-release-signed.apk")
+
+            // Build minimal valid APK ZIP container with AndroidManifest.xml and classes.dex
+            java.util.zip.ZipOutputStream(unsignedApk.outputStream()).use { zos ->
+                zos.putNextEntry(java.util.zip.ZipEntry("AndroidManifest.xml"))
+                zos.write(byteArrayOf(0x03, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00))
+                zos.closeEntry()
+
+                zos.putNextEntry(java.util.zip.ZipEntry("classes.dex"))
+                zos.write("dex\n035\u0000".toByteArray())
+                zos.closeEntry()
+            }
+
+            val keystore = com.example.data.build.OfflineApkBuildAndSignEngine.generatePkcs12Keystore(
+                keyAlias = "release",
+                storePassword = "test-password",
+                commonName = "Offline Signer Test"
+            )
+
+            val verification = com.example.data.build.OfflineApkBuildAndSignEngine.signApkOffline(
+                inputApk = unsignedApk,
+                outputApk = signedApk,
+                keystore = keystore
+            )
+
+            assertTrue(signedApk.exists())
+            assertTrue(signedApk.length() > unsignedApk.length())
+            assertTrue("Expected signed APK verification to pass: ${verification.errors}", verification.isVerified)
+            assertTrue(verification.v1Verified)
+            assertTrue(verification.v2Verified)
+            assertTrue(verification.v3Verified)
+            assertEquals(keystore.sha256Fingerprint, verification.sha256Fingerprint)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun offlineApkSigner_extractRepairedKotlinIfCleanerAcceptsBetterAndRejectsBroken() {
+        val brokenFile = com.example.model.GeneratedFile(
+            path = "app/src/main/java/com/demo/MainActivity.kt",
+            content = """
+                package com.demo
+
+                @Composable
+                fun BrokenView() {
+                    Column {
+                        Text("Hi")
+                }
+            """.trimIndent()
+        )
+
+        val cleanResponse = """
+            ```kotlin
+            package com.demo
+
+            import androidx.compose.foundation.layout.Column
+            import androidx.compose.material3.Text
+            import androidx.compose.runtime.Composable
+
+            @Composable
+            fun BrokenView() {
+                Column {
+                    Text("Hi")
+                }
+            }
+            ```
+        """.trimIndent()
+
+        val accepted = com.example.data.build.OfflineApkBuildAndSignEngine.extractRepairedKotlinIfCleaner(
+            originalFile = brokenFile,
+            rawModelResponse = cleanResponse
+        )
+        assertNotNull(accepted)
+        assertTrue(accepted!!.content.contains("import androidx.compose.material3.Text"))
+
+        val worseResponse = """
+            ```kotlin
+            fun Broken() {
+                {{{
+            ```
+        """.trimIndent()
+        val rejected = com.example.data.build.OfflineApkBuildAndSignEngine.extractRepairedKotlinIfCleaner(
+            originalFile = brokenFile,
+            rawModelResponse = worseResponse
+        )
+        assertEquals(null, rejected)
+    }
+
+    @Test
+    fun composePreviewEngine_selectsSetContentRootParsesWhenIfClickableAndRememberSaveable() {
+        val mainActivityKt = """
+            package com.example.shop
+
+            import androidx.activity.ComponentActivity
+            import androidx.activity.compose.setContent
+            import androidx.compose.foundation.clickable
+            import androidx.compose.foundation.layout.Box
+            import androidx.compose.material3.NavigationBar
+            import androidx.compose.material3.NavigationBarItem
+            import androidx.compose.material3.Scaffold
+            import androidx.compose.material3.Text
+            import androidx.compose.runtime.Composable
+            import androidx.compose.runtime.getValue
+            import androidx.compose.runtime.mutableIntStateOf
+            import androidx.compose.runtime.saveable.rememberSaveable
+            import androidx.compose.runtime.setValue
+            import androidx.compose.ui.Modifier
+            import androidx.compose.ui.unit.dp
+
+            class MainActivity : ComponentActivity() {
+                override fun onCreate(savedInstanceState: android.os.Bundle?) {
+                    super.onCreate(savedInstanceState)
+                    setContent {
+                        ShopTheme {
+                            ShopRootScreen()
+                        }
+                    }
+                }
+            }
+
+            @Composable
+            fun SmallBadge() {
+                Text("Helper")
+            }
+
+            @Composable
+            fun ShopRootScreen() {
+                var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+                Scaffold(
+                    bottomBar = {
+                        NavigationBar {
+                            NavigationBarItem(
+                                selected = selectedTab == 0,
+                                onClick = { selectedTab = 0 },
+                                label = { Text("Home") },
+                                icon = { Text("H") }
+                            )
+                            NavigationBarItem(
+                                selected = selectedTab == 1,
+                                onClick = { selectedTab = 1 },
+                                label = { Text("Cart") },
+                                icon = { Text("C") }
+                            )
+                        }
+                    }
+                ) { _ ->
+                    when (selectedTab) {
+                        0 -> Box(modifier = Modifier.padding(top = 8.dp).clickable { selectedTab = 1 }) {
+                            Text("Home Content")
+                        }
+                        else -> Text("Cart Content")
+                    }
+                }
+            }
+        """.trimIndent()
+
+        val result = ComposePreviewEngine.parseProjectSources(
+            files = listOf("app/src/main/java/com/example/shop/MainActivity.kt" to mainActivityKt)
+        )
+        assertNotNull(result.selectedComposable)
+        assertEquals("ShopRootScreen", result.selectedComposable!!.name)
+        assertEquals(1, result.selectedComposable!!.stateVars.size)
+        assertEquals("selectedTab", result.selectedComposable!!.stateVars.first().name)
+        assertEquals(0, result.selectedComposable!!.stateVars.first().initialValue)
+
+        val scaffoldNode = result.selectedComposable!!.rootNodes.first { it.name == "Scaffold" }
+        val whenNode = scaffoldNode.children.first { it.name == "__when__" }
+        assertEquals("selectedTab", whenNode.conditionExpr)
+        assertEquals(2, whenNode.branches.size)
+
+        val boxNode = whenNode.branches[0].second.first { it.name == "Box" }
+        assertEquals(8f, boxNode.modifier.paddingTopDp)
+        assertTrue(boxNode.modifier.hasClickable)
+        assertEquals("selectedTab = 1", boxNode.modifier.onClickCode)
+    }
+
+    @Test
+    fun localMediaPipeBuildPipeline_parsesLlmGradleAndShellTasksRejectsGitHubAndWiresProject() {
+        val sampleProject = com.example.model.StudioProject(
+            id = "mediapipe-pipeline-test",
+            appName = "Pocket Compiler",
+            packageName = "com.example.pocketcompiler",
+            prompt = "Offline Android compiler",
+            files = listOf(
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/java/com/example/pocketcompiler/MainActivity.kt",
+                    content = "package com.example.pocketcompiler\nclass MainActivity"
+                ),
+                com.example.model.GeneratedFile(
+                    path = "app/build.gradle.kts",
+                    content = "android {\n    compileSdk = 35\n    defaultConfig { minSdk = 24; targetSdk = 35 }\n}"
+                )
+            )
+        )
+
+        val prompt = com.example.data.build.LocalMediaPipeBuildPipeline.buildMediaPipeTaskGenerationPrompt(
+            project = sampleProject,
+            keyAlias = "release",
+            storePassword = "secret",
+            commonName = "Pocket Compiler",
+            sha256Fingerprint = "AA:BB:CC"
+        )
+        assertTrue(prompt.contains("com.example.pocketcompiler"))
+        assertTrue(prompt.contains("offlineCompileReleaseApk"))
+        assertTrue(prompt.contains("offlineSignReleaseApk"))
+
+        // 1. Parse fenced MediaPipe output with valid offline Gradle & shell blocks
+        val fencedLlmOutput = """
+            Here are your offline Gradle and shell tasks:
+            ```kotlin
+            tasks.register("offlineVerifySources") { doLast { println("ok") } }
+            tasks.register("offlineCompileReleaseApk") { dependsOn("assembleRelease") }
+            tasks.register("offlineSignReleaseApk") { doLast { println("apksigner signing-release.p12") } }
+            tasks.register("offlineVerifyApkSignature") { doLast { println("verify") } }
+            tasks.register("offlineBuildAndSignRelease") { dependsOn("offlineVerifyApkSignature") }
+            ```
+            ```bash
+            #!/usr/bin/env bash
+            gradle :app:offlineBuildAndSignRelease --offline
+            ```
+        """.trimIndent()
+
+        val parsedFenced = com.example.data.build.LocalMediaPipeBuildPipeline.parseMediaPipePipelineResponse(
+            rawResponse = fencedLlmOutput,
+            project = sampleProject,
+            modelName = "Qwen 2.5 0.5B"
+        )
+        assertTrue(parsedFenced.generatedByMediaPipe)
+        assertTrue(parsedFenced.originLabel.contains("MediaPipe LLM"))
+        assertTrue(parsedFenced.gradleTasksKts.contains("offlineCompileReleaseApk"))
+        assertTrue(parsedFenced.shellScript.contains("--offline"))
+        assertEquals(5, parsedFenced.tasks.size)
+
+        // 2. Reject unsafe or GitHub-dependent LLM output and fall back safely
+        val unsafeLlmOutput = """
+            ```kotlin
+            tasks.register("badTask") { doLast { exec { commandLine("curl", "http://github.com/evil") } } }
+            ```
+            ```bash
+            curl http://github.com/actions/checkout
+            ```
+        """.trimIndent()
+        val sanitizedFallback = com.example.data.build.LocalMediaPipeBuildPipeline.parseMediaPipePipelineResponse(
+            rawResponse = unsafeLlmOutput,
+            project = sampleProject,
+            modelName = "Qwen 2.5 0.5B"
+        )
+        assertFalse(sanitizedFallback.generatedByMediaPipe)
+        assertFalse(sanitizedFallback.gradleTasksKts.contains("github.com/evil"))
+        assertFalse(sanitizedFallback.shellScript.contains("curl http"))
+
+        // 3. Apply pipeline artifacts to project & verify idempotence + inspection hydration
+        val (updatedProject, injected) = com.example.data.build.LocalMediaPipeBuildPipeline.applyPipelineToProject(
+            project = sampleProject,
+            pipeline = parsedFenced
+        )
+        assertTrue(injected.contains(com.example.data.build.LocalMediaPipeBuildPipeline.GRADLE_PIPELINE_FILE_PATH))
+        assertTrue(injected.contains(com.example.data.build.LocalMediaPipeBuildPipeline.PIPELINE_MANIFEST_PATH))
+        val gradleFile = updatedProject.files.first { it.path == "app/build.gradle.kts" }.content
+        assertTrue(gradleFile.contains("apply(from = \"../gradle/offline-build-tasks.gradle.kts\")"))
+
+        val hydrated = com.example.data.build.LocalMediaPipeBuildPipeline.inspectProjectPipeline(updatedProject)
+        assertNotNull(hydrated)
+        assertTrue(hydrated!!.offlineOnly)
+        assertFalse(hydrated.githubActionsRequired)
+        assertTrue(hydrated.generatedByMediaPipe)
+        assertEquals(5, hydrated.tasks.size)
+    }
 }
+
+
+
 
 
 

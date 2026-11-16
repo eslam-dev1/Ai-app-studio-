@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -80,7 +81,9 @@ class ExampleRobolectricTest {
     composeRule.onNodeWithTag("save_cloud_credentials_button").performScrollTo()
       .assertIsEnabled()
       .performClick()
-    composeRule.waitForIdle()
+    composeRule.waitUntil(timeoutMillis = 5_000) {
+      composeRule.onAllNodesWithTag("verify_saved_key_status_button").fetchSemanticsNodes().isNotEmpty()
+    }
     composeRule.onNodeWithTag("verify_saved_key_status_button").performScrollTo().assertIsDisplayed()
     composeRule.onNodeWithTag("api_usage_summary_card").performScrollTo().assertIsDisplayed()
   }
@@ -206,7 +209,9 @@ class ExampleRobolectricTest {
     composeRule.onNodeWithTag("save_monthly_threshold_button").performScrollTo()
       .assertIsEnabled()
       .performClick()
-    composeRule.waitForIdle()
+    composeRule.waitUntil(timeoutMillis = 5_000) {
+      composeRule.onAllNodesWithTag("settings_monthly_threshold_active_badge").fetchSemanticsNodes().isNotEmpty()
+    }
     composeRule.onNodeWithTag("settings_monthly_threshold_active_badge").performScrollTo().assertIsDisplayed()
 
     // Return to Dashboard and verify warning banner is rendered

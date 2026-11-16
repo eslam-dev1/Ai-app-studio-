@@ -131,6 +131,79 @@ data class WorkflowStep(
     val number: Int = 0
 )
 
+@Serializable
+data class GitRefObject(
+    val sha: String,
+    val type: String? = null
+)
+
+@Serializable
+data class GitRefResponse(
+    val ref: String,
+    @SerialName("object")
+    val objectInfo: GitRefObject
+)
+
+@Serializable
+data class GitTreeRef(
+    val sha: String
+)
+
+@Serializable
+data class GitCommitResponse(
+    val sha: String,
+    val tree: GitTreeRef
+)
+
+@Serializable
+data class CreateGitBlobRequest(
+    val content: String,
+    val encoding: String = "base64"
+)
+
+@Serializable
+data class CreateGitBlobResponse(
+    val sha: String
+)
+
+@Serializable
+data class GitTreeEntry(
+    val path: String,
+    val mode: String = "100644",
+    val type: String = "blob",
+    val sha: String
+)
+
+@Serializable
+data class CreateGitTreeRequest(
+    @SerialName("base_tree")
+    val baseTree: String? = null,
+    val tree: List<GitTreeEntry>
+)
+
+@Serializable
+data class CreateGitTreeResponse(
+    val sha: String
+)
+
+@Serializable
+data class CreateGitCommitRequest(
+    val message: String,
+    val tree: String,
+    val parents: List<String> = emptyList()
+)
+
+@Serializable
+data class CreateGitCommitResponse(
+    val sha: String
+)
+
+@Serializable
+data class UpdateGitRefRequest(
+    val sha: String,
+    val force: Boolean = false
+)
+
 interface GitHubApi {
     @GET("user")
     suspend fun getAuthenticatedUser(
@@ -144,6 +217,61 @@ interface GitHubApi {
         @Header("Accept") accept: String = "application/vnd.github+json",
         @Body request: CreateRepoRequest
     ): GitHubRepoResponse
+
+    @GET("repos/{owner}/{repo}/git/ref/{ref}")
+    suspend fun getGitRef(
+        @Header("Authorization") authorization: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("ref", encoded = true) ref: String = "heads/main",
+        @Header("Accept") accept: String = "application/vnd.github+json"
+    ): GitRefResponse
+
+    @GET("repos/{owner}/{repo}/git/commits/{commit_sha}")
+    suspend fun getGitCommit(
+        @Header("Authorization") authorization: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("commit_sha") commitSha: String,
+        @Header("Accept") accept: String = "application/vnd.github+json"
+    ): GitCommitResponse
+
+    @POST("repos/{owner}/{repo}/git/blobs")
+    suspend fun createGitBlob(
+        @Header("Authorization") authorization: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Body request: CreateGitBlobRequest,
+        @Header("Accept") accept: String = "application/vnd.github+json"
+    ): CreateGitBlobResponse
+
+    @POST("repos/{owner}/{repo}/git/trees")
+    suspend fun createGitTree(
+        @Header("Authorization") authorization: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Body request: CreateGitTreeRequest,
+        @Header("Accept") accept: String = "application/vnd.github+json"
+    ): CreateGitTreeResponse
+
+    @POST("repos/{owner}/{repo}/git/commits")
+    suspend fun createGitCommit(
+        @Header("Authorization") authorization: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Body request: CreateGitCommitRequest,
+        @Header("Accept") accept: String = "application/vnd.github+json"
+    ): CreateGitCommitResponse
+
+    @retrofit2.http.PATCH("repos/{owner}/{repo}/git/refs/{ref}")
+    suspend fun updateGitRef(
+        @Header("Authorization") authorization: String,
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("ref", encoded = true) ref: String = "heads/main",
+        @Body request: UpdateGitRefRequest,
+        @Header("Accept") accept: String = "application/vnd.github+json"
+    ): GitRefResponse
 
     @GET("repos/{owner}/{repo}/contents/{path}")
     suspend fun getFileContent(

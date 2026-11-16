@@ -1,14 +1,20 @@
 package com.example.data.github
 
-import android.util.Base64
+import com.example.data.remote.CreateGitBlobRequest
+import com.example.data.remote.CreateGitCommitRequest
+import com.example.data.remote.CreateGitTreeRequest
 import com.example.data.remote.CreateRepoRequest
 import com.example.data.remote.GitHubApi
+import com.example.data.remote.GitTreeEntry
 import com.example.data.remote.PutContentRequest
+import com.example.data.remote.UpdateGitRefRequest
 import com.example.data.remote.WorkflowRun
 import com.example.model.ConsoleLogEntry
 import com.example.model.ConsoleLogLevel
+import com.example.model.GeneratedFile
 import com.example.model.StudioProject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -34,7 +40,9 @@ data class CloudBuildResult(
     val artifactDownloadUrl: String?
 )
 
-class GitHubBuildRepository {
+class GitHubBuildRepository(
+    private val customApi: GitHubApi? = null
+) {
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -42,22 +50,24 @@ class GitHubBuildRepository {
     }
 
     private val api: GitHubApi by lazy {
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC
-        }
-        val client = OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .addInterceptor(logging)
-            .build()
+        customApi ?: run {
+            val logging = HttpLoggingInterceptor().apply {
+                level = HttpLoggingInterceptor.Level.BASIC
+            }
+            val client = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .addInterceptor(logging)
+                .build()
 
-        Retrofit.Builder()
-            .baseUrl("https://api.github.com/")
-            .client(client)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-            .create(GitHubApi::class.java)
+            Retrofit.Builder()
+                .baseUrl("https://api.github.com/")
+                .client(client)
+                .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+                .build()
+                .create(GitHubApi::class.java)
+        }
     }
 
     suspend fun ensureGitHubRepo(
@@ -118,6 +128,7 @@ class GitHubBuildRepository {
         var repoName = project.gitHubRepoName?.takeIf { it.isNotBlank() }
         var repoUrl = project.gitHubRepoUrl
         var cloneUrl = if (repoName != null) "https://github.com/$owner/$repoName.git" else ""
+        var defaultBranch = "main"
 
         if (repoName == null) {
             repoName = "ai-app-${System.currentTimeMillis() / 1000}"
@@ -142,6 +153,7 @@ class GitHubBuildRepository {
             repoName = created.name
             repoUrl = created.htmlUrl
             cloneUrl = created.cloneUrl
+            defaultBranch = created.defaultBranch.ifBlank { "main" }
             onConsoleLog(
                 ConsoleLogEntry(
                     id = UUID.randomUUID().toString(),
@@ -166,49 +178,51 @@ class GitHubBuildRepository {
             appName = project.appName,
             files = project.files
         )
+        val normalizedFiles = filesWithWorkflow
+            .mapNotNull { file ->
+                val cleanPath = file.path.trim().removePrefix("/")
+                if (cleanPath.isBlank() || cleanPath.contains("..")) null
+                else file.copy(path = cleanPath)
+            }
+            .associateBy { it.path }
+            .values
+            .sortedBy { it.path }
 
-        filesWithWorkflow.forEachIndexed { index, file ->
-            val cleanPath = file.path.trim().removePrefix("/")
-            if (cleanPath.isBlank()) return@forEachIndexed
-            onProgress("Uploading (${index + 1}/${filesWithWorkflow.size}): $cleanPath")
+        val previousLatestRunId = runCatching {
+            api.listWorkflowRuns(tokenHeader, owner, repoName).workflowRuns.firstOrNull()?.id
+        }.getOrNull()
 
-            val existingSha = runCatching {
-                api.getFileContent(
-                    authorization = tokenHeader,
-                    owner = owner,
-                    repo = repoName,
-                    path = cleanPath
-                ).sha
-            }.getOrNull()
-
-            val rawBytes = com.example.ui.assets.ProjectResAssetManager.decodeBinaryContent(file.content)
-                ?: file.content.toByteArray(Charsets.UTF_8)
-            val encodedContent = Base64.encodeToString(
-                rawBytes,
-                Base64.NO_WRAP
-            )
-
-            api.putFileContent(
-                authorization = tokenHeader,
+        val pushedAtomically = runCatching {
+            pushAtomicTreeCommit(
+                tokenHeader = tokenHeader,
                 owner = owner,
-                repo = repoName,
-                path = cleanPath,
-                request = PutContentRequest(
-                    message = "Add/update $cleanPath via AI App Studio",
-                    content = encodedContent,
-                    branch = "main",
-                    sha = existingSha
-                )
+                repoName = repoName,
+                branch = defaultBranch,
+                appName = project.appName,
+                files = normalizedFiles,
+                onProgress = onProgress,
+                onConsoleLog = onConsoleLog
             )
-
+        }.onFailure { err ->
             onConsoleLog(
                 ConsoleLogEntry(
                     id = UUID.randomUUID().toString(),
-                    level = ConsoleLogLevel.DEBUG,
+                    level = ConsoleLogLevel.WARN,
                     tag = "GitTreeSync",
-                    message = "[${index + 1}/${filesWithWorkflow.size}] Committed $cleanPath (${rawBytes.size} bytes)",
-                    filePath = cleanPath
+                    message = "Atomic Git Data push unavailable (${err.localizedMessage}); falling back to Contents API…"
                 )
+            )
+        }.isSuccess
+
+        if (!pushedAtomically) {
+            pushFilesIndividuallyFallback(
+                tokenHeader = tokenHeader,
+                owner = owner,
+                repoName = repoName,
+                branch = defaultBranch,
+                files = normalizedFiles,
+                onProgress = onProgress,
+                onConsoleLog = onConsoleLog
             )
         }
 
@@ -221,11 +235,14 @@ class GitHubBuildRepository {
                 message = "Querying workflow runs for $owner/$repoName (.github/workflows/build-apk.yml)…"
             )
         )
-        val runs = runCatching {
-            api.listWorkflowRuns(tokenHeader, owner, repoName).workflowRuns
-        }.getOrDefault(emptyList())
 
-        val latestRun = runs.firstOrNull()
+        val latestRun = pollForNewWorkflowRun(
+            tokenHeader = tokenHeader,
+            owner = owner,
+            repoName = repoName,
+            previousRunId = previousLatestRunId
+        )
+
         if (latestRun != null) {
             emitWorkflowJobSteps(tokenHeader, owner, repoName, latestRun.id, onConsoleLog)
         }
@@ -258,6 +275,162 @@ class GitHubBuildRepository {
             actionsUrl = actionsUrl,
             artifactDownloadUrl = artifactUrl
         )
+    }
+
+    private suspend fun pushAtomicTreeCommit(
+        tokenHeader: String,
+        owner: String,
+        repoName: String,
+        branch: String,
+        appName: String,
+        files: List<GeneratedFile>,
+        onProgress: suspend (String) -> Unit,
+        onConsoleLog: (ConsoleLogEntry) -> Unit
+    ) {
+        val refPath = "heads/$branch"
+        var headRef: com.example.data.remote.GitRefResponse? = null
+        var lastError: Throwable? = null
+        repeat(4) { attempt ->
+            try {
+                headRef = api.getGitRef(tokenHeader, owner, repoName, refPath)
+                return@repeat
+            } catch (ex: Throwable) {
+                lastError = ex
+                if (attempt < 3) delay(450L)
+            }
+        }
+        val resolvedRef = headRef ?: throw (lastError ?: IllegalStateException("Unable to resolve $refPath"))
+        val headCommitSha = resolvedRef.objectInfo.sha
+        val baseTreeSha = api.getGitCommit(tokenHeader, owner, repoName, headCommitSha).tree.sha
+
+        val treeEntries = mutableListOf<GitTreeEntry>()
+        files.forEachIndexed { index, file ->
+            onProgress("Uploading (${index + 1}/${files.size}): ${file.path}")
+            val rawBytes = com.example.ui.assets.ProjectResAssetManager.decodeBinaryContent(file.content)
+                ?: file.content.toByteArray(Charsets.UTF_8)
+            val encodedBase64 = encodeBase64(rawBytes)
+            val blob = api.createGitBlob(
+                authorization = tokenHeader,
+                owner = owner,
+                repo = repoName,
+                request = CreateGitBlobRequest(content = encodedBase64, encoding = "base64")
+            )
+            treeEntries += GitTreeEntry(
+                path = file.path,
+                mode = "100644",
+                type = "blob",
+                sha = blob.sha
+            )
+        }
+
+        onProgress("Creating single atomic Git commit (${treeEntries.size} files)…")
+        val newTree = api.createGitTree(
+            authorization = tokenHeader,
+            owner = owner,
+            repo = repoName,
+            request = CreateGitTreeRequest(
+                baseTree = baseTreeSha,
+                tree = treeEntries
+            )
+        )
+        val newCommit = api.createGitCommit(
+            authorization = tokenHeader,
+            owner = owner,
+            repo = repoName,
+            request = CreateGitCommitRequest(
+                message = "Sync $appName (${treeEntries.size} files) via AI App Studio",
+                tree = newTree.sha,
+                parents = listOf(headCommitSha)
+            )
+        )
+        api.updateGitRef(
+            authorization = tokenHeader,
+            owner = owner,
+            repo = repoName,
+            ref = refPath,
+            request = UpdateGitRefRequest(sha = newCommit.sha, force = false)
+        )
+
+        onConsoleLog(
+            ConsoleLogEntry(
+                id = UUID.randomUUID().toString(),
+                level = ConsoleLogLevel.SUCCESS,
+                tag = "GitTreeSync",
+                message = "Committed ${treeEntries.size} files atomically in commit ${newCommit.sha.take(7)} on $branch"
+            )
+        )
+    }
+
+    private suspend fun pushFilesIndividuallyFallback(
+        tokenHeader: String,
+        owner: String,
+        repoName: String,
+        branch: String,
+        files: List<GeneratedFile>,
+        onProgress: suspend (String) -> Unit,
+        onConsoleLog: (ConsoleLogEntry) -> Unit
+    ) {
+        files.forEachIndexed { index, file ->
+            val cleanPath = file.path
+            onProgress("Uploading (${index + 1}/${files.size}): $cleanPath")
+
+            val existingSha = runCatching {
+                api.getFileContent(
+                    authorization = tokenHeader,
+                    owner = owner,
+                    repo = repoName,
+                    path = cleanPath,
+                    branch = branch
+                ).sha
+            }.getOrNull()
+
+            val rawBytes = com.example.ui.assets.ProjectResAssetManager.decodeBinaryContent(file.content)
+                ?: file.content.toByteArray(Charsets.UTF_8)
+            val encodedContent = encodeBase64(rawBytes)
+
+            api.putFileContent(
+                authorization = tokenHeader,
+                owner = owner,
+                repo = repoName,
+                path = cleanPath,
+                request = PutContentRequest(
+                    message = "Add/update $cleanPath via AI App Studio",
+                    content = encodedContent,
+                    branch = branch,
+                    sha = existingSha
+                )
+            )
+
+            onConsoleLog(
+                ConsoleLogEntry(
+                    id = UUID.randomUUID().toString(),
+                    level = ConsoleLogLevel.DEBUG,
+                    tag = "GitTreeSync",
+                    message = "[${index + 1}/${files.size}] Committed $cleanPath (${rawBytes.size} bytes)",
+                    filePath = cleanPath
+                )
+            )
+        }
+    }
+
+    private suspend fun pollForNewWorkflowRun(
+        tokenHeader: String,
+        owner: String,
+        repoName: String,
+        previousRunId: Long?
+    ): WorkflowRun? {
+        var latestRun: WorkflowRun? = null
+        repeat(3) { attempt ->
+            val runs = runCatching {
+                api.listWorkflowRuns(tokenHeader, owner, repoName).workflowRuns
+            }.getOrDefault(emptyList())
+            latestRun = runs.firstOrNull()
+            if (latestRun != null && (previousRunId == null || latestRun!!.id != previousRunId)) {
+                return latestRun
+            }
+            if (attempt < 2) delay(1200L)
+        }
+        return latestRun
     }
 
     suspend fun refreshBuildStatus(
@@ -455,6 +628,26 @@ class GitHubBuildRepository {
         } else {
             error.localizedMessage ?: "GitHub operation failed."
         }
+    }
+
+    private fun encodeBase64(bytes: ByteArray): String {
+        if (bytes.isEmpty()) return ""
+        val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        val sb = StringBuilder(((bytes.size + 2) / 3) * 4)
+        var i = 0
+        while (i < bytes.size) {
+            val b0 = bytes[i].toInt() and 0xFF
+            val hasB1 = i + 1 < bytes.size
+            val hasB2 = i + 2 < bytes.size
+            val b1 = if (hasB1) bytes[i + 1].toInt() and 0xFF else 0
+            val b2 = if (hasB2) bytes[i + 2].toInt() and 0xFF else 0
+            sb.append(alphabet[b0 ushr 2])
+            sb.append(alphabet[((b0 and 0x03) shl 4) or (b1 ushr 4)])
+            sb.append(if (hasB1) alphabet[((b1 and 0x0F) shl 2) or (b2 ushr 6)] else '=')
+            sb.append(if (hasB2) alphabet[b2 and 0x3F] else '=')
+            i += 3
+        }
+        return sb.toString()
     }
 
     companion object {

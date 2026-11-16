@@ -22,12 +22,17 @@ data class ParsedModifier(
     val paddingAllDp: Float? = null,
     val paddingHorizontalDp: Float? = null,
     val paddingVerticalDp: Float? = null,
+    val paddingStartDp: Float? = null,
+    val paddingTopDp: Float? = null,
+    val paddingEndDp: Float? = null,
+    val paddingBottomDp: Float? = null,
     val widthDp: Float? = null,
     val heightDp: Float? = null,
     val sizeDp: Float? = null,
     val weight: Float? = null,
     val backgroundColorExpr: String? = null,
     val clipCornerDp: Float? = null,
+    val isCircleClip: Boolean = false,
     val hasClickable: Boolean = false,
     val onClickCode: String? = null
 )
@@ -42,7 +47,9 @@ data class ComposeNode(
     val namedSlots: Map<String, List<ComposeNode>> = emptyMap(),
     val repeatCount: Int = 1,
     val listItems: List<String> = emptyList(),
-    val itemVarName: String = "item"
+    val itemVarName: String = "item",
+    val conditionExpr: String? = null,
+    val branches: List<Pair<String?, List<ComposeNode>>> = emptyList()
 )
 
 data class PreviewParseResult(
@@ -101,10 +108,24 @@ object ComposePreviewEngine {
             )
         }
 
+        val setContentRootName = orderedFiles.firstNotNullOfOrNull { (_, content) ->
+            extractSetContentBody(content)?.let { findPrimaryInvokedComposable(it) }
+        }
+
         val selected = discovered.firstOrNull {
             preferredComposableName != null && it.name == preferredComposableName
         } ?: discovered.firstOrNull {
-            preferredFilePath != null && it.filePath == preferredFilePath && !it.name.endsWith("Theme")
+            preferredFilePath != null && it.filePath == preferredFilePath &&
+                !it.name.endsWith("Theme") && !it.name.endsWith("Preview")
+        } ?: discovered.firstOrNull {
+            setContentRootName != null && it.name == setContentRootName
+        } ?: discovered.firstOrNull {
+            containsScaffoldNode(it.rootNodes) && !it.name.endsWith("Theme") && !it.name.endsWith("Preview")
+        } ?: discovered.firstOrNull {
+            (it.name.endsWith("Screen") || it.name.endsWith("App") || it.name == "Main" || it.name == "Home") &&
+                !it.name.endsWith("Theme") && !it.name.endsWith("Preview")
+        } ?: discovered.firstOrNull {
+            !it.name.endsWith("Theme") && !it.name.endsWith("Preview") && it.rootNodes.isNotEmpty()
         } ?: discovered.firstOrNull {
             !it.name.endsWith("Theme") && !it.name.endsWith("Preview")
         } ?: discovered.first()
@@ -119,6 +140,30 @@ object ComposePreviewEngine {
             selectedComposable = selected,
             warningMessage = warning
         )
+    }
+
+    private fun findPrimaryInvokedComposable(setContentBody: String): String? {
+        val nodes = parseBlock(setContentBody)
+        fun walk(list: List<ComposeNode>): String? {
+            for (node in list) {
+                if (!node.name.endsWith("Theme") && !node.name.startsWith("__") &&
+                    node.name !in setOf("Surface", "MaterialTheme", "Box", "Column", "Row")
+                ) {
+                    return node.name
+                }
+                walk(node.children)?.let { return it }
+            }
+            return null
+        }
+        return walk(nodes)
+    }
+
+    private fun containsScaffoldNode(nodes: List<ComposeNode>): Boolean {
+        return nodes.any { node ->
+            node.name == "Scaffold" ||
+                containsScaffoldNode(node.children) ||
+                node.branches.any { (_, branchNodes) -> containsScaffoldNode(branchNodes) }
+        }
     }
 
     /**
@@ -241,7 +286,7 @@ object ComposePreviewEngine {
     private fun extractStateVars(body: String): List<PreviewStateVar> {
         val vars = mutableListOf<PreviewStateVar>()
         val regex = Regex(
-            """(?:var|val)\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:by|=)\s+remember(?:\s*\([^)]*\))?\s*\{\s*mutable(?:Int|Float|Double|State)?Of\s*\(([^)]*)\)\s*\}"""
+            """(?:var|val)\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:by|=)\s+remember(?:Saveable)?(?:\s*\([^)]*\))?\s*\{\s*mutable(?:(?:Int|Float|Double|Long)?State|Int|Float|Double|Long)?Of\s*\(([^)]*)\)\s*\}"""
         )
         regex.findAll(body).forEach { match ->
             val varName = match.groupValues[1]
@@ -270,6 +315,70 @@ object ComposePreviewEngine {
             // Skip whitespace & comments
             i = skipWhitespaceAndComments(code, i)
             if (i >= n) break
+
+            // Handle when (expr) { ... }
+            if (code.startsWith("when", i) && (i + 4 < n && (code[i + 4] == '(' || code[i + 4].isWhitespace()))) {
+                var cursor = skipWhitespaceAndComments(code, i + 4)
+                var subject = ""
+                if (cursor < n && code[cursor] == '(') {
+                    val pEnd = findMatchingDelimiter(code, cursor, '(', ')')
+                    if (pEnd != -1) {
+                        subject = code.substring(cursor + 1, pEnd).trim()
+                        cursor = skipWhitespaceAndComments(code, pEnd + 1)
+                    }
+                }
+                if (cursor < n && code[cursor] == '{') {
+                    val bEnd = findMatchingDelimiter(code, cursor, '{', '}')
+                    val blockBody = if (bEnd != -1) code.substring(cursor + 1, bEnd) else code.substring(cursor + 1)
+                    val parsedBranches = parseWhenBranches(blockBody)
+                    if (parsedBranches.isNotEmpty()) {
+                        nodes += ComposeNode(
+                            name = "__when__",
+                            conditionExpr = subject,
+                            branches = parsedBranches
+                        )
+                    }
+                    i = if (bEnd != -1) bEnd + 1 else n
+                    continue
+                }
+            }
+
+            // Handle if (cond) { ... } [else { ... }]
+            if (code.startsWith("if", i) && (i + 2 < n && (code[i + 2] == '(' || code[i + 2].isWhitespace()))) {
+                val pStart = skipWhitespaceAndComments(code, i + 2)
+                if (pStart < n && code[pStart] == '(') {
+                    val pEnd = findMatchingDelimiter(code, pStart, '(', ')')
+                    if (pEnd != -1) {
+                        val condExpr = code.substring(pStart + 1, pEnd).trim()
+                        var cursor = skipWhitespaceAndComments(code, pEnd + 1)
+                        if (cursor < n && code[cursor] == '{') {
+                            val bEnd = findMatchingDelimiter(code, cursor, '{', '}')
+                            val thenBody = if (bEnd != -1) code.substring(cursor + 1, bEnd) else code.substring(cursor + 1)
+                            val branches = mutableListOf<Pair<String?, List<ComposeNode>>>()
+                            branches += condExpr to parseBlock(thenBody)
+                            cursor = if (bEnd != -1) skipWhitespaceAndComments(code, bEnd + 1) else n
+                            if (cursor < n && code.startsWith("else", cursor) &&
+                                (cursor + 4 >= n || !code[cursor + 4].isLetterOrDigit())
+                            ) {
+                                val afterElse = skipWhitespaceAndComments(code, cursor + 4)
+                                if (afterElse < n && code[afterElse] == '{') {
+                                    val elseEnd = findMatchingDelimiter(code, afterElse, '{', '}')
+                                    val elseBody = if (elseEnd != -1) code.substring(afterElse + 1, elseEnd) else code.substring(afterElse + 1)
+                                    branches += null to parseBlock(elseBody)
+                                    cursor = if (elseEnd != -1) elseEnd + 1 else n
+                                }
+                            }
+                            nodes += ComposeNode(
+                                name = "__if__",
+                                conditionExpr = condExpr,
+                                branches = branches
+                            )
+                            i = cursor
+                            continue
+                        }
+                    }
+                }
+            }
 
             // Handle repeat(N) { ... }
             if (code.startsWith("repeat", i) && (i + 6 < n && (code[i + 6] == '(' || code[i + 6].isWhitespace()))) {
@@ -403,6 +512,67 @@ object ComposePreviewEngine {
         }
 
         return nodes
+    }
+
+    private fun parseWhenBranches(blockBody: String): List<Pair<String?, List<ComposeNode>>> {
+        val branches = mutableListOf<Pair<String?, List<ComposeNode>>>()
+        var i = 0
+        val n = blockBody.length
+        while (i < n) {
+            i = skipWhitespaceAndComments(blockBody, i)
+            if (i >= n) break
+            val arrowIdx = findWhenBranchArrow(blockBody, i)
+            if (arrowIdx == -1) break
+            val condRaw = blockBody.substring(i, arrowIdx).trim()
+            val condKey: String? = if (condRaw == "else") null else condRaw
+            var cursor = skipWhitespaceAndComments(blockBody, arrowIdx + 2)
+            if (cursor < n && blockBody[cursor] == '{') {
+                val bEnd = findMatchingDelimiter(blockBody, cursor, '{', '}')
+                val body = if (bEnd != -1) blockBody.substring(cursor + 1, bEnd) else blockBody.substring(cursor + 1)
+                branches += condKey to parseBlock(body)
+                i = if (bEnd != -1) bEnd + 1 else n
+            } else {
+                val stmtEnd = findStatementEnd(blockBody, cursor)
+                val singleStmt = blockBody.substring(cursor, stmtEnd).trim()
+                branches += condKey to parseBlock(singleStmt)
+                i = stmtEnd + 1
+            }
+        }
+        return branches
+    }
+
+    private fun findWhenBranchArrow(text: String, start: Int): Int {
+        var depth = 0
+        var inStr = false
+        for (idx in start until text.length - 1) {
+            val c = text[idx]
+            if (c == '"' && (idx == 0 || text[idx - 1] != '\\')) inStr = !inStr
+            if (!inStr) {
+                when (c) {
+                    '(', '{', '[' -> depth++
+                    ')', '}', ']' -> if (depth > 0) depth--
+                    '-' -> if (depth == 0 && text[idx + 1] == '>') return idx
+                }
+            }
+        }
+        return -1
+    }
+
+    private fun findStatementEnd(text: String, start: Int): Int {
+        var depth = 0
+        var inStr = false
+        for (idx in start until text.length) {
+            val c = text[idx]
+            if (c == '"' && (idx == 0 || text[idx - 1] != '\\')) inStr = !inStr
+            if (!inStr) {
+                when (c) {
+                    '(', '{', '[' -> depth++
+                    ')', '}', ']' -> if (depth > 0) depth--
+                    '\n', ';' -> if (depth == 0) return idx
+                }
+            }
+        }
+        return text.length
     }
 
     private fun isActionCallbackComposable(name: String): Boolean =
@@ -563,10 +733,18 @@ object ComposePreviewEngine {
                 val h = Regex("""horizontal\s*=\s*(\d+(?:\.\d+)?)\.dp""").find(arg)?.groupValues?.get(1)?.toFloatOrNull()
                 val v = Regex("""vertical\s*=\s*(\d+(?:\.\d+)?)\.dp""").find(arg)?.groupValues?.get(1)?.toFloatOrNull()
                 val all = Regex("""all\s*=\s*(\d+(?:\.\d+)?)\.dp""").find(arg)?.groupValues?.get(1)?.toFloatOrNull()
+                val startDp = Regex("""start\s*=\s*(\d+(?:\.\d+)?)\.dp""").find(arg)?.groupValues?.get(1)?.toFloatOrNull()
+                val topDp = Regex("""top\s*=\s*(\d+(?:\.\d+)?)\.dp""").find(arg)?.groupValues?.get(1)?.toFloatOrNull()
+                val endDp = Regex("""end\s*=\s*(\d+(?:\.\d+)?)\.dp""").find(arg)?.groupValues?.get(1)?.toFloatOrNull()
+                val bottomDp = Regex("""bottom\s*=\s*(\d+(?:\.\d+)?)\.dp""").find(arg)?.groupValues?.get(1)?.toFloatOrNull()
                 mod = mod.copy(
                     paddingHorizontalDp = h ?: mod.paddingHorizontalDp,
                     paddingVerticalDp = v ?: mod.paddingVerticalDp,
-                    paddingAllDp = all ?: mod.paddingAllDp
+                    paddingAllDp = all ?: mod.paddingAllDp,
+                    paddingStartDp = startDp ?: mod.paddingStartDp,
+                    paddingTopDp = topDp ?: mod.paddingTopDp,
+                    paddingEndDp = endDp ?: mod.paddingEndDp,
+                    paddingBottomDp = bottomDp ?: mod.paddingBottomDp
                 )
             }
         }
@@ -589,10 +767,41 @@ object ComposePreviewEngine {
         Regex("""RoundedCornerShape\((\d+(?:\.\d+)?)\.dp\)""").find(expr)?.let {
             mod = mod.copy(clipCornerDp = it.groupValues[1].toFloatOrNull())
         }
+        if (expr.contains("CircleShape")) {
+            mod = mod.copy(isCircleClip = true)
+        }
         if (expr.contains(".clickable")) {
-            mod = mod.copy(hasClickable = true)
+            val clickCode = extractClickableLambda(expr)
+            mod = mod.copy(hasClickable = true, onClickCode = clickCode)
         }
         return mod
+    }
+
+    private fun extractClickableLambda(expr: String): String? {
+        val idx = expr.indexOf(".clickable")
+        if (idx == -1) return null
+        var cursor = skipWhitespaceAndComments(expr, idx + ".clickable".length)
+        if (cursor < expr.length && expr[cursor] == '(') {
+            val pEnd = findMatchingDelimiter(expr, cursor, '(', ')')
+            if (pEnd != -1) {
+                val argsText = expr.substring(cursor + 1, pEnd)
+                val braceInArgs = argsText.indexOf('{')
+                if (braceInArgs != -1) {
+                    val bEnd = findMatchingDelimiter(argsText, braceInArgs, '{', '}')
+                    if (bEnd != -1) {
+                        return argsText.substring(braceInArgs + 1, bEnd).trim()
+                    }
+                }
+                cursor = skipWhitespaceAndComments(expr, pEnd + 1)
+            }
+        }
+        if (cursor < expr.length && expr[cursor] == '{') {
+            val bEnd = findMatchingDelimiter(expr, cursor, '{', '}')
+            if (bEnd != -1) {
+                return expr.substring(cursor + 1, bEnd).trim()
+            }
+        }
+        return null
     }
 
     fun resolveColorExpr(expr: String?): Color? {

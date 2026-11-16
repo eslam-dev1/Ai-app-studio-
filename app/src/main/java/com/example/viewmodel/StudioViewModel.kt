@@ -23,6 +23,7 @@ import com.example.data.github.GitHubBuildRepository
 import com.example.data.github.GitHubWorkflowInjector
 import com.example.data.service.BackgroundFactoryState
 import com.example.data.service.BackgroundTaskManager
+import com.example.data.service.FactoryBuildService
 import com.example.data.local.CustomSqlTableEntity
 import com.example.data.local.ProjectSqlEntity
 import com.example.data.local.RoomCodeGenerator
@@ -32,6 +33,9 @@ import com.example.data.preferences.ApiKeyVerificationStatus
 import com.example.data.preferences.ApiUsageHeaderParser
 import com.example.data.preferences.ApiUsageSummary
 import com.example.data.preferences.ApiUsageThresholdEvaluator
+import com.example.data.build.LocalMediaPipeBuildPipeline
+import com.example.data.build.OfflineApkBuildAndSignEngine
+import com.example.data.build.OfflineKeystoreArtifact
 import com.example.data.preferences.ConfiguredCloudProvider
 import com.example.data.preferences.MonthlyUsageAlertState
 import com.example.data.preferences.ParsedUsageHeaders
@@ -56,11 +60,13 @@ import com.example.model.GeneratedFile
 import com.example.model.GenerationUiState
 import com.example.model.GitRepoState
 import com.example.model.LocalModelDownloadState
+import com.example.model.OfflineSigningStatus
 import com.example.model.ProjectSnapshot
 import com.example.model.RefactorUiState
 import com.example.model.StudioProject
 import com.example.model.StudioSettings
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -71,14 +77,17 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -119,6 +128,21 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _cloudBuildProgress = MutableStateFlow<String?>(null)
     val cloudBuildProgress: StateFlow<String?> = _cloudBuildProgress.asStateFlow()
+
+    private val _isAutoFixingBuild = MutableStateFlow(false)
+    val isAutoFixingBuild: StateFlow<Boolean> = _isAutoFixingBuild.asStateFlow()
+
+    private val _isOfflineBuildBusy = MutableStateFlow(false)
+    val isOfflineBuildBusy: StateFlow<Boolean> = _isOfflineBuildBusy.asStateFlow()
+
+    private val _offlineBuildProgress = MutableStateFlow<String?>(null)
+    val offlineBuildProgress: StateFlow<String?> = _offlineBuildProgress.asStateFlow()
+
+    private val _offlineBuildStreamPreview = MutableStateFlow("")
+    val offlineBuildStreamPreview: StateFlow<String> = _offlineBuildStreamPreview.asStateFlow()
+
+    private val _offlineSigningStatus = MutableStateFlow(OfflineSigningStatus())
+    val offlineSigningStatus: StateFlow<OfflineSigningStatus> = _offlineSigningStatus.asStateFlow()
 
     private val _consoleLogs = MutableStateFlow<List<ConsoleLogEntry>>(emptyList())
     val consoleLogs: StateFlow<List<ConsoleLogEntry>> = _consoleLogs.asStateFlow()
@@ -226,6 +250,22 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             settingsDataStore.settingsFlow.collect { latestSettings ->
                 generatorRepository.updateConfiguration(latestSettings)
             }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _activeProject
+                .map { proj ->
+                    proj?.let {
+                        Triple(
+                            it.id,
+                            it.appName,
+                            it.files.firstOrNull { f -> f.path == OfflineApkBuildAndSignEngine.KEYSTORE_PROJECT_PATH }?.content
+                        )
+                    }
+                }
+                .distinctUntilChanged()
+                .collect {
+                    refreshOfflineSigningStatus(_activeProject.value)
+                }
         }
         refreshProjects()
         bootstrapBundledModelOnLaunch()
@@ -867,10 +907,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             openRouterModel = modelId
         )
         generatorRepository.updateConfiguration(nextSettings)
+        verifySavedProviderCredentials(nextSettings)
         viewModelScope.launch {
             settingsDataStore.updateCloudSettings(cleanOr, cleanGem, modelId)
             _snackbarMessage.value = "API credentials encrypted & saved to DataStore"
-            verifySavedProviderCredentials(nextSettings)
         }
     }
 
@@ -1713,54 +1753,121 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         val current = _activeProject.value ?: return
         viewModelScope.launch {
-            val updatedFiles = current.files.map { file ->
+            autoSaver.flushNowBlocking()
+            val latest = _activeProject.value ?: current
+            val cleanAppName = newAppName.trim().ifBlank { latest.appName }
+            val cleanPackageId = newPackageId.trim().ifBlank { latest.packageName }
+            val cleanVersionName = newVersionName.trim().ifBlank { "1.0.0" }
+            val xmlEscapedAppName = cleanAppName
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "\\'")
+
+            val fileMap = latest.files.map { file ->
                 var content = file.content
                 when {
-                    file.path.endsWith("strings.xml") -> {
+                    file.path.endsWith("strings.xml", ignoreCase = true) -> {
                         if (content.contains("<string name=\"app_name\">")) {
                             content = content.replace(
                                 Regex("<string name=\"app_name\">.*?</string>"),
-                                "<string name=\"app_name\">$newAppName</string>"
+                                "<string name=\"app_name\">$xmlEscapedAppName</string>"
+                            )
+                        } else if (content.contains("</resources>")) {
+                            content = content.replace(
+                                "</resources>",
+                                "    <string name=\"app_name\">$xmlEscapedAppName</string>\n</resources>"
                             )
                         }
                     }
-                    file.path.endsWith("build.gradle.kts") -> {
-                        if (newPackageId.isNotBlank()) {
+                    file.path.endsWith("app/build.gradle.kts") || file.path.endsWith("app/build.gradle") -> {
+                        if (cleanPackageId.isNotBlank()) {
                             content = content.replace(
-                                Regex("applicationId\\s*=\\s*\".*?\""),
-                                "applicationId = \"$newPackageId\""
+                                Regex("""applicationId\s*=?\s*["'].*?["']"""),
+                                if (file.path.endsWith(".kts")) "applicationId = \"$cleanPackageId\""
+                                else "applicationId \"$cleanPackageId\""
+                            )
+                            content = content.replace(
+                                Regex("""namespace\s*=?\s*["'].*?["']"""),
+                                if (file.path.endsWith(".kts")) "namespace = \"$cleanPackageId\""
+                                else "namespace \"$cleanPackageId\""
                             )
                         }
-                        if (newVersionName.isNotBlank()) {
+                        if (cleanVersionName.isNotBlank()) {
                             content = content.replace(
-                                Regex("versionName\\s*=\\s*\".*?\""),
-                                "versionName = \"$newVersionName\""
+                                Regex("""versionName\s*=?\s*["'].*?["']"""),
+                                if (file.path.endsWith(".kts")) "versionName = \"$cleanVersionName\""
+                                else "versionName \"$cleanVersionName\""
                             )
                         }
                     }
-                    file.path.endsWith("AndroidManifest.xml") -> {
-                        if (newPackageId.isNotBlank() && content.contains("package=")) {
+                    file.path.endsWith("AndroidManifest.xml", ignoreCase = true) -> {
+                        if (cleanPackageId.isNotBlank() && content.contains("package=")) {
                             content = content.replace(
-                                Regex("package=\".*?\""),
-                                "package=\"$newPackageId\""
+                                Regex("package=\"[^\"]*\""),
+                                "package=\"$cleanPackageId\""
                             )
                         }
                     }
                 }
                 file.copy(content = content)
-            }.toMutableList()
+            }.associateBy { it.path }.toMutableMap()
 
-            val updatedProject = current.copy(
-                appName = newAppName.ifBlank { current.appName },
-                packageName = newPackageId.ifBlank { current.packageName },
-                files = updatedFiles,
+            // Ensure strings.xml exists with updated app_name
+            if (fileMap.keys.none { it.endsWith("strings.xml", ignoreCase = true) }) {
+                fileMap["app/src/main/res/values/strings.xml"] = GeneratedFile(
+                    path = "app/src/main/res/values/strings.xml",
+                    content = """
+                        <resources>
+                            <string name="app_name">$xmlEscapedAppName</string>
+                        </resources>
+                    """.trimIndent()
+                )
+            }
+
+            var appliedIconLabel = "unchanged"
+            val cleanBase64 = launcherIconBase64?.trim()?.takeIf { it.isNotBlank() }
+            val cleanVectorXml = launcherIconVectorXml?.trim()?.takeIf { it.startsWith("<vector") }
+            if (cleanBase64 != null) {
+                val encodedAsset = com.example.ui.assets.ProjectResAssetManager.BINARY_CONTENT_PREFIX + cleanBase64
+                fileMap.remove("app/src/main/res/drawable/ic_launcher_foreground.xml")
+                fileMap["app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"] = GeneratedFile(
+                    path = "app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+                    content = encodedAsset
+                )
+                fileMap["app/src/main/res/drawable/ic_launcher_foreground.png"] = GeneratedFile(
+                    path = "app/src/main/res/drawable/ic_launcher_foreground.png",
+                    content = encodedAsset
+                )
+                appliedIconLabel = "custom PNG icon"
+            } else if (cleanVectorXml != null) {
+                fileMap.remove("app/src/main/res/drawable/ic_launcher_foreground.png")
+                fileMap["app/src/main/res/drawable/ic_launcher_foreground.xml"] = GeneratedFile(
+                    path = "app/src/main/res/drawable/ic_launcher_foreground.xml",
+                    content = cleanVectorXml
+                )
+                appliedIconLabel = "vector drawable icon"
+            }
+
+            val updatedProject = latest.copy(
+                appName = cleanAppName,
+                packageName = cleanPackageId,
+                files = fileMap.values.sortedBy { it.path },
                 updatedAtEpochMs = System.currentTimeMillis()
             )
 
             val saved = storageRepository.saveProject(updatedProject)
             _activeProject.value = saved
-            createProjectSnapshot("Updated branding to '$newAppName' ($newPackageId v$newVersionName)")
-            _snackbarMessage.value = "App branding saved successfully"
+            _projects.value = storageRepository.loadAllProjects()
+            refreshGitStatus(saved.id)
+            createProjectSnapshot("Updated branding to '$cleanAppName' ($cleanPackageId v$cleanVersionName, $appliedIconLabel)")
+            appendConsoleLog(
+                level = ConsoleLogLevel.SUCCESS,
+                tag = "BrandingStudio",
+                message = "Updated APK identity: '$cleanAppName', package='$cleanPackageId', version='$cleanVersionName', icon=$appliedIconLabel."
+            )
+            _snackbarMessage.value = "App branding & icon saved ($appliedIconLabel)"
         }
     }
 
@@ -2749,9 +2856,674 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun autoFixActiveProject() {
+        val current = _activeProject.value ?: return
+        viewModelScope.launch {
+            autoSaver.flushNowBlocking()
+            val latest = _activeProject.value ?: current
+            val (fixedProject, fixes) = com.example.diagnostics.CodeQuickActionEngine.autoFixProject(latest)
+            if (fixes.isNotEmpty()) {
+                val saved = storageRepository.saveProject(fixedProject)
+                _activeProject.value = saved
+                _projects.value = storageRepository.loadAllProjects()
+                refreshGitStatus(saved.id)
+                fixes.forEach { fixDesc ->
+                    appendConsoleLog(
+                        level = ConsoleLogLevel.SUCCESS,
+                        tag = "AutoFix",
+                        message = fixDesc
+                    )
+                }
+                appendConsoleEntries(ProjectStaticAnalyzer.analyzeProject(saved))
+                _snackbarMessage.value = "Auto-fixed ${fixes.size} issue(s) across project files"
+            } else {
+                appendConsoleEntries(ProjectStaticAnalyzer.analyzeProject(latest))
+                _snackbarMessage.value = "0 auto-fixable issues found"
+            }
+        }
+    }
+
+    fun optimizeActiveProject() {
+        val current = _activeProject.value ?: return
+        viewModelScope.launch {
+            autoSaver.flushNowBlocking()
+            val latest = _activeProject.value ?: current
+            val (optimizedProject, changes) = com.example.diagnostics.CodeQuickActionEngine.optimizeProjectPerformance(latest)
+            if (changes.isNotEmpty()) {
+                val saved = storageRepository.saveProject(optimizedProject)
+                _activeProject.value = saved
+                _projects.value = storageRepository.loadAllProjects()
+                refreshGitStatus(saved.id)
+                changes.forEach { change ->
+                    appendConsoleLog(
+                        level = ConsoleLogLevel.SUCCESS,
+                        tag = "ComposeOptimizer",
+                        message = change
+                    )
+                }
+                appendConsoleEntries(ProjectStaticAnalyzer.analyzeProject(saved))
+                _snackbarMessage.value = "Applied ${changes.size} Compose performance optimization(s)"
+            } else {
+                _snackbarMessage.value = "Project is already following Compose performance best practices"
+            }
+        }
+    }
+
+    fun fixBuildIssuesWithAi() {
+        val current = _activeProject.value ?: return
+        if (_isAutoFixingBuild.value) return
+        viewModelScope.launch {
+            _isAutoFixingBuild.value = true
+            try {
+                autoSaver.flushNowBlocking()
+                val latest = _activeProject.value ?: current
+                val (fixedProject, fixes) = com.example.diagnostics.CodeQuickActionEngine.autoFixProject(latest)
+                var workingProject = fixedProject
+                val appliedMessages = fixes.toMutableList()
+
+                // Re-check for any remaining Kotlin compiler errors
+                val preDiagnostics = ProjectStaticAnalyzer.analyzeProject(workingProject)
+                val firstErrorEntry = preDiagnostics.firstOrNull {
+                    it.level == ConsoleLogLevel.ERROR && it.filePath?.endsWith(".kt", ignoreCase = true) == true
+                }
+
+                if (firstErrorEntry?.filePath != null) {
+                    val targetFile = workingProject.files.firstOrNull { it.path == firstErrorEntry.filePath }
+                    val currentSettings = settings.value
+                    val hasCloudKey = ApiCredentialValidator.resolveConfiguredProvider(currentSettings) != null
+                    val offlineModelFile = resolveExistingOfflineModelFile(currentSettings)
+                    if (targetFile != null && hasCloudKey) {
+                        appendConsoleLog(
+                            level = ConsoleLogLevel.INFO,
+                            tag = "AutoHealAI",
+                            message = "Running Cloud AI repair on ${targetFile.path} for: ${firstErrorEntry.message}",
+                            filePath = targetFile.path
+                        )
+                        runCatching {
+                            refactorRepository.analyzeAndRefactorKotlinFile(
+                                filePath = targetFile.path,
+                                sourceCode = targetFile.content,
+                                settings = currentSettings,
+                                onStatusUpdate = { msg ->
+                                    appendConsoleLog(
+                                        level = ConsoleLogLevel.DEBUG,
+                                        tag = "AutoHealAI",
+                                        message = msg,
+                                        filePath = targetFile.path
+                                    )
+                                }
+                            )
+                        }.onSuccess { result ->
+                            if (result.refactoredCode.isNotBlank() && result.refactoredCode != targetFile.content) {
+                                val updatedFiles = workingProject.files.map { f ->
+                                    if (f.path == targetFile.path) f.copy(content = result.refactoredCode) else f
+                                }
+                                workingProject = workingProject.copy(
+                                    files = updatedFiles,
+                                    updatedAtEpochMs = System.currentTimeMillis()
+                                )
+                                appliedMessages += "${targetFile.path.substringAfterLast('/')}: AI repaired via ${result.modelUsed}"
+                            }
+                        }.onFailure { err ->
+                            appendConsoleLog(
+                                level = ConsoleLogLevel.WARN,
+                                tag = "AutoHealAI",
+                                message = "Cloud AI repair skipped: ${err.localizedMessage}"
+                            )
+                        }
+                    } else if (targetFile != null && offlineModelFile != null) {
+                        appendConsoleLog(
+                            level = ConsoleLogLevel.INFO,
+                            tag = "OfflineAutoHealAI",
+                            message = "Running Offline AI (${offlineModelFile.name}) repair on ${targetFile.path}…",
+                            filePath = targetFile.path
+                        )
+                        runCatching {
+                            val repairPrompt = OfflineApkBuildAndSignEngine.buildOfflineKotlinRepairPrompt(
+                                file = targetFile,
+                                diagnostics = preDiagnostics
+                            )
+                            val (response, _) = generatorRepository.runLocalPromptBenchmarkStep(
+                                savedModelPath = offlineModelFile.absolutePath,
+                                prompt = repairPrompt
+                            )
+                            OfflineApkBuildAndSignEngine.extractRepairedKotlinIfCleaner(targetFile, response)
+                        }.onSuccess { repairedFile ->
+                            if (repairedFile != null) {
+                                workingProject = workingProject.copy(
+                                    files = workingProject.files.map { f ->
+                                        if (f.path == targetFile.path) repairedFile else f
+                                    },
+                                    updatedAtEpochMs = System.currentTimeMillis()
+                                )
+                                appliedMessages += "${targetFile.path.substringAfterLast('/')}: Repaired offline via ${offlineModelFile.name}"
+                            }
+                        }.onFailure { err ->
+                            appendConsoleLog(
+                                level = ConsoleLogLevel.WARN,
+                                tag = "OfflineAutoHealAI",
+                                message = "Offline AI repair skipped: ${err.localizedMessage}"
+                            )
+                        }
+                    }
+                }
+
+                val newStatus = if (appliedMessages.isNotEmpty()) {
+                    "Auto-fixed ${appliedMessages.size} issue(s) — ready to rebuild APK"
+                } else {
+                    "Static check complete — review GitHub Actions log & Rebuild"
+                }
+
+                val saved = storageRepository.saveProject(
+                    workingProject.copy(lastBuildStatus = newStatus)
+                )
+                _activeProject.value = saved
+                _projects.value = storageRepository.loadAllProjects()
+                refreshGitStatus(saved.id)
+
+                appliedMessages.forEach { msg ->
+                    appendConsoleLog(
+                        level = ConsoleLogLevel.SUCCESS,
+                        tag = "AutoHeal",
+                        message = msg
+                    )
+                }
+                appendConsoleEntries(ProjectStaticAnalyzer.analyzeProject(saved))
+                _snackbarMessage.value = newStatus
+            } finally {
+                _isAutoFixingBuild.value = false
+            }
+        }
+    }
+
+    suspend fun downloadReadyApkUri(): Uri? {
+        val project = _activeProject.value ?: return null
+        val owner = project.gitHubRepoOwner?.takeIf { it.isNotBlank() }
+        val repo = project.gitHubRepoName?.takeIf { it.isNotBlank() }
+        val runId = project.lastWorkflowRunId
+        val pat = settings.value.gitHubPat.trim()
+
+        if (owner == null || repo == null || runId == null || pat.isBlank()) {
+            appendConsoleLog(
+                level = ConsoleLogLevel.WARN,
+                tag = "ApkDownloader",
+                message = "Missing repository link, runId, or GitHub PAT to download APK binary directly."
+            )
+            return null
+        }
+
+        _isCloudBuildBusy.value = true
+        _cloudBuildProgress.value = "Fetching compiled APK artifact from GitHub Actions…"
+        return try {
+            val downloadsDir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+            val apkFile = gitHubRepository.downloadCompiledApkArtifact(
+                pat = pat,
+                owner = owner,
+                repoName = repo,
+                runId = runId,
+                targetDownloadsDir = downloadsDir,
+                appName = project.appName,
+                onProgress = { msg -> _cloudBuildProgress.value = msg }
+            )
+            if (apkFile != null && apkFile.exists() && apkFile.length() > 0L) {
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    getApplication(),
+                    "${getApplication<Application>().packageName}.fileprovider",
+                    apkFile
+                )
+                appendConsoleLog(
+                    level = ConsoleLogLevel.SUCCESS,
+                    tag = "ApkInstaller",
+                    message = "Downloaded ${apkFile.name} (${apkFile.length() / 1024} KB). Launching Android Package Installer…"
+                )
+                uri
+            } else {
+                appendConsoleLog(
+                    level = ConsoleLogLevel.WARN,
+                    tag = "ApkDownloader",
+                    message = "No active .apk artifact found for Run #$runId (may have expired)."
+                )
+                null
+            }
+        } catch (ex: Exception) {
+            val errMsg = gitHubRepository.buildErrorMessage(ex)
+            appendConsoleLog(
+                level = ConsoleLogLevel.ERROR,
+                tag = "ApkDownloader",
+                message = "APK download failed: $errMsg"
+            )
+            _snackbarMessage.value = "APK download failed — opening Actions page"
+            null
+        } finally {
+            _isCloudBuildBusy.value = false
+            _cloudBuildProgress.value = null
+        }
+    }
+
     suspend fun exportBuildLogs(): Uri? {
         val project = _activeProject.value ?: return null
         return storageRepository.exportBuildLogsToTxt(project, _consoleLogs.value)
+    }
+
+    private fun resolveExistingOfflineModelFile(currentSettings: StudioSettings): File? {
+        val configuredPath = currentSettings.localModelFilePath.trim()
+        if (configuredPath.isNotBlank()) {
+            val f = File(configuredPath)
+            if (f.exists() && f.canRead()) return f
+        }
+        val bundledTarget = BundledModelManager.getTargetModelFile(getApplication())
+        return if (bundledTarget.exists() && bundledTarget.canRead()) bundledTarget else null
+    }
+
+    private fun safeAppSlug(appName: String): String =
+        appName.lowercase()
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
+            .ifBlank { "app" }
+
+    private fun refreshOfflineSigningStatus(project: StudioProject?) {
+        if (project == null) {
+            _offlineSigningStatus.value = OfflineSigningStatus()
+            return
+        }
+        val keystore = OfflineApkBuildAndSignEngine.inspectProjectKeystore(project)
+        val exportsDir = File(getApplication<Application>().cacheDir, "exports")
+        val signedApkFile = File(exportsDir, "${safeAppSlug(project.appName)}-offline-signed.apk")
+        val verification = if (signedApkFile.exists() && signedApkFile.length() > 0L) {
+            OfflineApkBuildAndSignEngine.verifyApkSignature(signedApkFile)
+        } else null
+
+        val offlineModel = resolveExistingOfflineModelFile(settings.value)
+        val aiStatus = if (offlineModel != null) {
+            "Offline AI Ready (${settings.value.localModelDisplayName.ifBlank { offlineModel.name }})"
+        } else {
+            "Static Analyzer Ready (Download Local AI model in Settings for LLM repair)"
+        }
+
+        val pipelineManifest = LocalMediaPipeBuildPipeline.inspectProjectPipeline(project)
+        val gradleTasksScript = project.files
+            .firstOrNull { it.path == LocalMediaPipeBuildPipeline.GRADLE_PIPELINE_FILE_PATH }
+            ?.content
+            .orEmpty()
+
+        _offlineSigningStatus.value = OfflineSigningStatus(
+            hasKeystore = keystore != null,
+            keyAlias = keystore?.keyAlias ?: OfflineApkBuildAndSignEngine.DEFAULT_KEY_ALIAS,
+            commonName = keystore?.commonName ?: project.appName,
+            sha256Fingerprint = keystore?.sha256Fingerprint.orEmpty(),
+            signedApkPath = signedApkFile.takeIf { verification?.isVerified == true }?.absolutePath,
+            signedApkSizeBytes = signedApkFile.takeIf { verification?.isVerified == true }?.length() ?: 0L,
+            isSignatureVerified = verification?.isVerified == true,
+            v1Signed = verification?.v1Verified == true,
+            v2Signed = verification?.v2Verified == true,
+            v3Signed = verification?.v3Verified == true,
+            aiEngineStatus = aiStatus,
+            lastBuiltAtEpochMs = project.updatedAtEpochMs,
+            pipelineTasks = pipelineManifest?.tasks.orEmpty(),
+            pipelineTasksScript = gradleTasksScript,
+            pipelineOriginLabel = pipelineManifest?.originLabel.orEmpty(),
+            pipelineLatencyMs = pipelineManifest?.inferenceLatencyMs ?: 0L
+        )
+    }
+
+    fun runOfflineAiBuildAndSign(
+        keyAlias: String = OfflineApkBuildAndSignEngine.DEFAULT_KEY_ALIAS,
+        storePassword: String = OfflineApkBuildAndSignEngine.DEFAULT_KEY_PASSWORD,
+        commonName: String = ""
+    ) {
+        val current = _activeProject.value ?: return
+        if (_isOfflineBuildBusy.value || _isCloudBuildBusy.value) return
+
+        viewModelScope.launch {
+            _isOfflineBuildBusy.value = true
+            _offlineBuildProgress.value = "Running pre-build static & Compose checks…"
+            _offlineBuildStreamPreview.value = ""
+            try {
+                autoSaver.flushNowBlocking()
+                val latest = _activeProject.value ?: current
+                val currentSettings = settings.value
+                val offlineModelFile = resolveExistingOfflineModelFile(currentSettings)
+
+                appendConsoleLog(
+                    level = ConsoleLogLevel.INFO,
+                    tag = "OfflineBuilder",
+                    message = "Starting Offline MediaPipe LLM Build & Signing pipeline for '${latest.appName}' (zero GitHub/network dependency)…"
+                )
+
+                // Step 1: Deterministic Auto-Fix
+                val (autoFixedProject, quickFixes) = withContext(Dispatchers.Default) {
+                    com.example.diagnostics.CodeQuickActionEngine.autoFixProject(latest)
+                }
+                var workingProject = autoFixedProject
+                quickFixes.forEach { fix ->
+                    appendConsoleLog(level = ConsoleLogLevel.SUCCESS, tag = "OfflineAutoFix", message = fix)
+                }
+
+                // Step 2: Static Analysis + Offline MediaPipe LLM Repair if errors remain
+                var diagnostics = withContext(Dispatchers.Default) {
+                    ProjectStaticAnalyzer.analyzeProject(workingProject)
+                }
+                val failingKotlinFiles = diagnostics
+                    .filter {
+                        (it.level == ConsoleLogLevel.ERROR || it.level == ConsoleLogLevel.WARN) &&
+                            it.filePath?.endsWith(".kt", ignoreCase = true) == true
+                    }
+                    .mapNotNull { it.filePath }
+                    .distinct()
+
+                if (offlineModelFile != null && failingKotlinFiles.isNotEmpty()) {
+                    _offlineBuildProgress.value = "MediaPipe LLM (${offlineModelFile.name}) repairing ${failingKotlinFiles.size} file(s)…"
+                    appendConsoleLog(
+                        level = ConsoleLogLevel.INFO,
+                        tag = "OfflineAI",
+                        message = "Invoking on-device MediaPipe LLM (${offlineModelFile.name}) to repair ${failingKotlinFiles.size} file(s)…"
+                    )
+                    for (path in failingKotlinFiles.take(2)) {
+                        val targetFile = workingProject.files.firstOrNull { it.path == path } ?: continue
+                        val repairPrompt = OfflineApkBuildAndSignEngine.buildOfflineKotlinRepairPrompt(targetFile, diagnostics)
+                        val repaired = runCatching {
+                            val (response, durationMs) = generatorRepository.runLocalPromptBenchmarkStep(
+                                savedModelPath = offlineModelFile.absolutePath,
+                                prompt = repairPrompt,
+                                onStreamToken = { stream -> _offlineBuildStreamPreview.value = stream }
+                            )
+                            appendConsoleLog(
+                                level = ConsoleLogLevel.DEBUG,
+                                tag = "OfflineAI",
+                                message = "MediaPipe LLM processed ${targetFile.path.substringAfterLast('/')} in ${durationMs} ms",
+                                filePath = targetFile.path
+                            )
+                            OfflineApkBuildAndSignEngine.extractRepairedKotlinIfCleaner(targetFile, response)
+                        }.getOrElse { err ->
+                            appendConsoleLog(
+                                level = ConsoleLogLevel.WARN,
+                                tag = "OfflineAI",
+                                message = "Offline AI repair skipped for ${targetFile.path}: ${err.localizedMessage}",
+                                filePath = targetFile.path
+                            )
+                            null
+                        }
+                        if (repaired != null) {
+                            workingProject = workingProject.copy(
+                                files = workingProject.files.map { f -> if (f.path == targetFile.path) repaired else f }
+                            )
+                            appendConsoleLog(
+                                level = ConsoleLogLevel.SUCCESS,
+                                tag = "OfflineAI",
+                                message = "MediaPipe LLM fixed compiler/Compose issues in ${targetFile.path}",
+                                filePath = targetFile.path
+                            )
+                        }
+                    }
+                    diagnostics = withContext(Dispatchers.Default) {
+                        ProjectStaticAnalyzer.analyzeProject(workingProject)
+                    }
+                } else if (offlineModelFile != null) {
+                    appendConsoleLog(
+                        level = ConsoleLogLevel.SUCCESS,
+                        tag = "OfflineAI",
+                        message = "MediaPipe LLM (${offlineModelFile.name}) ready — 0 compiler errors detected in Kotlin sources."
+                    )
+                } else {
+                    appendConsoleLog(
+                        level = ConsoleLogLevel.INFO,
+                        tag = "OfflineAI",
+                        message = "On-device .task model not downloaded yet; synthesizing deterministic offline compilation & signing tasks. Download a local model in Settings for MediaPipe LLM customization."
+                    )
+                }
+
+                // Step 3: Generate / load real PKCS12 keystore & inject Gradle release signing
+                _offlineBuildProgress.value = "Generating PKCS12 X.509 signing keystore…"
+                val resolvedCn = commonName.trim().ifBlank { workingProject.appName }
+                val injectionResult = withContext(Dispatchers.IO) {
+                    OfflineApkBuildAndSignEngine.applyOfflineSigningConfigToProject(
+                        project = workingProject,
+                        keyAlias = keyAlias,
+                        storePassword = storePassword,
+                        commonName = resolvedCn
+                    )
+                }
+                workingProject = injectionResult.updatedProject
+
+                appendConsoleLog(
+                    level = ConsoleLogLevel.SUCCESS,
+                    tag = "OfflineSigner",
+                    message = "PKCS12 Keystore ready (alias=${injectionResult.keystoreInfo.keyAlias}, SHA-256=${injectionResult.keystoreInfo.sha256Fingerprint})"
+                )
+
+                // Step 4: Generate custom offline APK compilation & signing Gradle tasks via MediaPipe LLM
+                _offlineBuildProgress.value = if (offlineModelFile != null) {
+                    "MediaPipe LLM generating offline Gradle compilation & signing tasks…"
+                } else {
+                    "Generating offline Gradle compilation & signing tasks…"
+                }
+                val pipelineResult = LocalMediaPipeBuildPipeline.generateLocalPipeline(
+                    project = workingProject,
+                    modelFile = offlineModelFile,
+                    repository = generatorRepository,
+                    keyAlias = injectionResult.keystoreInfo.keyAlias,
+                    storePassword = injectionResult.keystoreInfo.storePassword,
+                    commonName = injectionResult.keystoreInfo.commonName,
+                    sha256Fingerprint = injectionResult.keystoreInfo.sha256Fingerprint,
+                    onProgress = { msg -> _offlineBuildProgress.value = msg },
+                    onStreamPreview = { stream -> _offlineBuildStreamPreview.value = stream }
+                )
+                val (pipelinedProject, pipelinePaths) = withContext(Dispatchers.IO) {
+                    LocalMediaPipeBuildPipeline.applyPipelineToProject(workingProject, pipelineResult)
+                }
+                workingProject = pipelinedProject
+
+                appendConsoleLog(
+                    level = ConsoleLogLevel.SUCCESS,
+                    tag = "LocalPipeline",
+                    message = "${pipelineResult.originLabel}: generated ${pipelineResult.tasks.size} offline tasks -> ${pipelinePaths.joinToString()}"
+                )
+
+                // Step 5: If a compiled APK exists locally for this project (e.g. cached debug APK), sign & verify it offline via apksig
+                val exportsDir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+                val slug = safeAppSlug(workingProject.appName)
+                val cachedUnsignedOrDebugApk = File(exportsDir, "$slug-debug.apk")
+                val signedOutputApk = File(exportsDir, "$slug-offline-signed.apk")
+                var signedReady = false
+
+                if (cachedUnsignedOrDebugApk.exists() && cachedUnsignedOrDebugApk.length() > 0L) {
+                    _offlineBuildProgress.value = "Signing APK (v1/v2/v3) with Offline PKCS12 Keystore…"
+                    val verifyResult = withContext(Dispatchers.IO) {
+                        OfflineApkBuildAndSignEngine.signApkOffline(
+                            inputApk = cachedUnsignedOrDebugApk,
+                            outputApk = signedOutputApk,
+                            keystore = injectionResult.keystoreInfo
+                        )
+                    }
+                    if (verifyResult.isVerified) {
+                        signedReady = true
+                        appendConsoleLog(
+                            level = ConsoleLogLevel.SUCCESS,
+                            tag = "ApkSigner",
+                            message = "Signed & verified ${signedOutputApk.name} (${signedOutputApk.length() / 1024} KB) • v1=${verifyResult.v1Verified}, v2=${verifyResult.v2Verified}, v3=${verifyResult.v3Verified}"
+                        )
+                    } else {
+                        appendConsoleLog(
+                            level = ConsoleLogLevel.WARN,
+                            tag = "ApkSigner",
+                            message = "APK signing verification errors: ${verifyResult.errors.joinToString()}"
+                        )
+                    }
+                }
+
+                val remainingErrors = diagnostics.count { it.level == ConsoleLogLevel.ERROR }
+                val finalStatus = when {
+                    signedReady -> "Offline Signed APK Ready (v1/v2/v3 Verified)"
+                    remainingErrors > 0 -> "Offline Signing & Tasks Ready • $remainingErrors source error(s) remaining"
+                    pipelineResult.generatedByMediaPipe -> "MediaPipe LLM Local Build & Signing Tasks Ready (Zero GitHub)"
+                    else -> "Offline Compilation & PKCS12 Signing Tasks Ready (Zero GitHub)"
+                }
+
+                val savedProject = storageRepository.saveProject(
+                    workingProject.copy(lastBuildStatus = finalStatus)
+                )
+                _activeProject.value = savedProject
+                _projects.value = storageRepository.loadAllProjects()
+                refreshGitStatus(savedProject.id)
+                refreshOfflineSigningStatus(savedProject)
+                appendConsoleEntries(diagnostics)
+
+                _snackbarMessage.value = finalStatus
+                FactoryBuildService.showCompletionNotification(
+                    getApplication(),
+                    "Offline Build & Sign Complete",
+                    finalStatus
+                )
+            } catch (ex: Exception) {
+                appendConsoleLog(
+                    level = ConsoleLogLevel.ERROR,
+                    tag = "OfflineBuilder",
+                    message = "Offline build & sign failed: ${ex.localizedMessage ?: "Unknown error"}"
+                )
+                _errorDialogMessage.value = ex.localizedMessage ?: "Offline build & sign failed."
+                FactoryBuildService.showErrorNotification(
+                    getApplication(),
+                    "Offline Build Failed",
+                    ex.localizedMessage ?: "Unknown error"
+                )
+            } finally {
+                _isOfflineBuildBusy.value = false
+                _offlineBuildProgress.value = null
+                _offlineBuildStreamPreview.value = ""
+            }
+        }
+    }
+
+    suspend fun signExternalApkOffline(
+        apkUri: Uri,
+        keyAlias: String = OfflineApkBuildAndSignEngine.DEFAULT_KEY_ALIAS,
+        storePassword: String = OfflineApkBuildAndSignEngine.DEFAULT_KEY_PASSWORD,
+        commonName: String = ""
+    ): Uri? {
+        val current = _activeProject.value ?: return null
+        if (_isOfflineBuildBusy.value) return null
+
+        _isOfflineBuildBusy.value = true
+        _offlineBuildProgress.value = "Preparing PKCS12 keystore & reading APK…"
+        val app = getApplication<Application>()
+        return try {
+            val exportsDir = File(app.cacheDir, "exports").apply { mkdirs() }
+            val tempInputApk = File(exportsDir, "temp-input-${System.currentTimeMillis()}.apk")
+            val copied = withContext(Dispatchers.IO) {
+                app.contentResolver.openInputStream(apkUri)?.use { input ->
+                    tempInputApk.outputStream().use { output ->
+                        input.copyTo(output, bufferSize = 64 * 1024)
+                    }
+                    true
+                } ?: false
+            }
+            if (!copied || !tempInputApk.exists() || tempInputApk.length() == 0L) {
+                runCatching { tempInputApk.delete() }
+                appendConsoleLog(
+                    level = ConsoleLogLevel.ERROR,
+                    tag = "OfflineSigner",
+                    message = "Could not read selected .apk file."
+                )
+                return null
+            }
+
+            _offlineBuildProgress.value = "Ensuring PKCS12 X.509 signing certificate…"
+            val resolvedCn = commonName.trim().ifBlank { current.appName }
+            val injection = withContext(Dispatchers.IO) {
+                OfflineApkBuildAndSignEngine.applyOfflineSigningConfigToProject(
+                    project = current,
+                    keyAlias = keyAlias,
+                    storePassword = storePassword,
+                    commonName = resolvedCn
+                )
+            }
+
+            _offlineBuildProgress.value = "Signing APK with v1/v2/v3 signatures (apksig)…"
+            val signedFile = File(exportsDir, "${safeAppSlug(current.appName)}-offline-signed.apk")
+            val verifyResult = withContext(Dispatchers.IO) {
+                try {
+                    OfflineApkBuildAndSignEngine.signApkOffline(
+                        inputApk = tempInputApk,
+                        outputApk = signedFile,
+                        keystore = injection.keystoreInfo
+                    )
+                } finally {
+                    runCatching { tempInputApk.delete() }
+                }
+            }
+
+            if (!verifyResult.isVerified) {
+                val errSummary = verifyResult.errors.joinToString()
+                appendConsoleLog(
+                    level = ConsoleLogLevel.ERROR,
+                    tag = "ApkSigner",
+                    message = "Offline APK signing failed verification: $errSummary"
+                )
+                _snackbarMessage.value = "APK signing failed verification"
+                FactoryBuildService.showErrorNotification(
+                    getApplication(),
+                    "APK Signing Failed",
+                    "Verification errors: $errSummary"
+                )
+                return null
+            }
+
+            val saved = storageRepository.saveProject(
+                injection.updatedProject.copy(
+                    lastBuildStatus = "Offline Signed APK Ready (v1/v2/v3 Verified)"
+                )
+            )
+            _activeProject.value = saved
+            _projects.value = storageRepository.loadAllProjects()
+            refreshGitStatus(saved.id)
+            refreshOfflineSigningStatus(saved)
+
+            appendConsoleLog(
+                level = ConsoleLogLevel.SUCCESS,
+                tag = "ApkSigner",
+                message = "Signed ${signedFile.name} offline (${signedFile.length() / 1024} KB) • SHA-256=${verifyResult.sha256Fingerprint} • v1=${verifyResult.v1Verified}, v2=${verifyResult.v2Verified}, v3=${verifyResult.v3Verified}"
+            )
+            _snackbarMessage.value = "APK signed & verified offline — launching installer"
+            FactoryBuildService.showCompletionNotification(
+                app,
+                "Offline APK Signed & Verified",
+                "Signed ${signedFile.name} (${signedFile.length() / 1024} KB) verified v1+v2+v3"
+            )
+
+            androidx.core.content.FileProvider.getUriForFile(
+                app,
+                "${app.packageName}.fileprovider",
+                signedFile
+            )
+        } catch (ex: Exception) {
+            appendConsoleLog(
+                level = ConsoleLogLevel.ERROR,
+                tag = "ApkSigner",
+                message = "Offline APK signing failed: ${ex.localizedMessage ?: "Invalid APK or keystore"}"
+            )
+            _snackbarMessage.value = "Offline APK signing failed: ${ex.localizedMessage}"
+            FactoryBuildService.showErrorNotification(
+                app,
+                "APK Signing Failed",
+                ex.localizedMessage ?: "Invalid APK or keystore"
+            )
+            null
+        } finally {
+            _isOfflineBuildBusy.value = false
+            _offlineBuildProgress.value = null
+        }
+    }
+
+    fun getOfflineSignedApkInstallUri(): Uri? {
+        val path = _offlineSigningStatus.value.signedApkPath ?: return null
+        val file = File(path)
+        if (!file.exists() || file.length() == 0L) return null
+        val app = getApplication<Application>()
+        return androidx.core.content.FileProvider.getUriForFile(
+            app,
+            "${app.packageName}.fileprovider",
+            file
+        )
     }
 
     override fun onCleared() {

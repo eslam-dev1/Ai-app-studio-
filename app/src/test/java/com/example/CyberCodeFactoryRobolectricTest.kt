@@ -8,9 +8,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.service.BackgroundTaskManager
 import com.example.model.BuildPhase
@@ -164,5 +167,277 @@ class CyberCodeFactoryRobolectricTest {
         composeRule.onNodeWithText("Anti-Kill Foreground Service • WakeLock • Wi-Fi Lock").assertIsDisplayed()
         composeRule.onNodeWithText("Ensures model downloads, AI code generation, and APK compilation continue uninterrupted when screen locks or backgrounded.")
             .assertIsDisplayed()
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "w412dp-h915dp")
+    fun workspaceBuildApkTab_switchesBetweenOfflineAiAndGitHubCloudAndTriggersOfflineSign() {
+        var offlineBuildTriggeredWith: Triple<String, String, String>? = null
+        val sampleProject = com.example.model.StudioProject(
+            id = "offline-ui-test",
+            appName = "Offline Studio",
+            packageName = "com.example.offlinestudio",
+            prompt = "Test offline build & sign",
+            files = listOf(
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/java/com/example/offlinestudio/MainActivity.kt",
+                    content = "package com.example.offlinestudio\nclass MainActivity"
+                ),
+                com.example.model.GeneratedFile(
+                    path = "app/build.gradle.kts",
+                    content = "android { namespace = \"com.example.offlinestudio\" }"
+                )
+            )
+        )
+        val signingStatus = com.example.model.OfflineSigningStatus(
+            hasKeystore = true,
+            keyAlias = "release",
+            commonName = "Offline Studio",
+            sha256Fingerprint = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+            signedApkPath = "/tmp/offline-studio-signed.apk",
+            isSignatureVerified = true,
+            v1Signed = true,
+            v2Signed = true,
+            v3Signed = true,
+            signedApkSizeBytes = 256_000L,
+            aiEngineStatus = "Offline AI Ready: Qwen 2.5 1.5B"
+        )
+
+        composeRule.setContent {
+            AiAppStudioTheme(darkTheme = true) {
+                com.example.ui.screens.WorkspaceBuildApkTab(
+                    project = sampleProject,
+                    settings = com.example.model.StudioSettings(),
+                    gitState = com.example.model.GitRepoState(),
+                    hasGitHubPat = true,
+                    isGitBusy = false,
+                    isCloudBuildBusy = false,
+                    cloudBuildProgress = null,
+                    isOfflineBuildBusy = false,
+                    offlineBuildProgress = null,
+                    offlineSigningStatus = signingStatus,
+                    onTriggerCloudBuild = {},
+                    onRefreshCloudBuildStatus = {},
+                    onTriggerOfflineAiBuildAndSign = { alias, pass, cn ->
+                        offlineBuildTriggeredWith = Triple(alias, pass, cn)
+                    },
+                    onPackageZip = { null },
+                    onExportBuildLogs = { null },
+                    onInitGit = {},
+                    onRefreshGit = {},
+                    onStageFile = {},
+                    onUnstageFile = {},
+                    onStageAll = {},
+                    onCommitGit = {},
+                    onConfigureRemote = {},
+                    onPushGit = {},
+                    onPullGit = {},
+                    onOpenConsole = {},
+                    onOpenSettings = {}
+                )
+            }
+        }
+
+        val list = composeRule.onNodeWithTag("workspace_build_apk_tab")
+        list.performScrollToNode(hasTestTag("build_engine_selector"))
+        composeRule.onNodeWithTag("build_engine_selector").assertIsDisplayed()
+        list.performScrollToNode(hasTestTag("offline_keystore_fingerprint_text"))
+        composeRule.onNodeWithTag("offline_keystore_fingerprint_text").assertIsDisplayed()
+        list.performScrollToNode(hasTestTag("offline_ai_build_sign_button"))
+        composeRule.onNodeWithTag("offline_ai_build_sign_button").assertIsDisplayed()
+        list.performScrollToNode(hasTestTag("pick_apk_sign_offline_button"))
+        composeRule.onNodeWithTag("pick_apk_sign_offline_button").assertIsDisplayed()
+        list.performScrollToNode(hasTestTag("install_offline_signed_apk_button"))
+        composeRule.onNodeWithTag("install_offline_signed_apk_button").assertIsDisplayed()
+
+        list.performScrollToNode(hasTestTag("offline_ai_build_sign_button"))
+        composeRule.onNodeWithTag("offline_ai_build_sign_button").performClick()
+        assertEquals(
+            Triple(
+                com.example.data.build.OfflineApkBuildAndSignEngine.DEFAULT_KEY_ALIAS,
+                com.example.data.build.OfflineApkBuildAndSignEngine.DEFAULT_KEY_PASSWORD,
+                "Offline Studio"
+            ),
+            offlineBuildTriggeredWith
+        )
+
+        list.performScrollToNode(hasTestTag("build_mode_github_cloud"))
+        composeRule.onNodeWithTag("build_mode_github_cloud").performClick()
+        composeRule.waitForIdle()
+        list.performScrollToNode(hasTestTag("cloud_apk_build_button"))
+        composeRule.onNodeWithTag("cloud_apk_build_button").assertIsDisplayed()
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "w412dp-h915dp")
+    fun livePreviewDeviceFrame_switchesNavigationTabsAndSupportsClickableActions() {
+        val sampleSource = """
+            package com.example.previewtest
+
+            import androidx.compose.foundation.clickable
+            import androidx.compose.foundation.layout.Box
+            import androidx.compose.material3.NavigationBar
+            import androidx.compose.material3.NavigationBarItem
+            import androidx.compose.material3.Scaffold
+            import androidx.compose.material3.Text
+            import androidx.compose.runtime.Composable
+            import androidx.compose.runtime.getValue
+            import androidx.compose.runtime.mutableIntStateOf
+            import androidx.compose.runtime.remember
+            import androidx.compose.runtime.setValue
+            import androidx.compose.ui.Modifier
+
+            @Composable
+            fun DemoRootScreen() {
+                var selectedTab by remember { mutableIntStateOf(0) }
+                Scaffold(
+                    bottomBar = {
+                        NavigationBar {
+                            NavigationBarItem(
+                                selected = selectedTab == 0,
+                                onClick = { selectedTab = 0 },
+                                label = { Text("HomeTab") },
+                                icon = {}
+                            )
+                            NavigationBarItem(
+                                selected = selectedTab == 1,
+                                onClick = { selectedTab = 1 },
+                                label = { Text("ExploreTab") },
+                                icon = {}
+                            )
+                        }
+                    }
+                ) { _ ->
+                    when (selectedTab) {
+                        0 -> Box(modifier = Modifier.clickable { selectedTab = 1 }) {
+                            Text("Welcome Home View")
+                        }
+                        else -> Text("Explore Catalog View")
+                    }
+                }
+            }
+        """.trimIndent()
+
+        val parseResult = com.example.preview.ComposePreviewEngine.parseProjectSources(
+            files = listOf("app/src/main/java/com/example/previewtest/MainActivity.kt" to sampleSource)
+        )
+
+        composeRule.setContent {
+            AiAppStudioTheme(darkTheme = true) {
+                com.example.preview.LivePreviewDeviceFrame(
+                    composableInfo = parseResult.selectedComposable,
+                    allComposables = parseResult.composables,
+                    darkPreview = true,
+                    appName = "Preview Test",
+                    fontScale = 1.15f,
+                    isLandscape = false
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Welcome Home View").assertIsDisplayed()
+        composeRule.onNodeWithText("Explore Catalog View").assertDoesNotExist()
+
+        // Tapping NavigationBarItem "ExploreTab" switches active when() branch inside preview device
+        composeRule.onNodeWithText("ExploreTab").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Explore Catalog View").assertIsDisplayed()
+        composeRule.onNodeWithText("Welcome Home View").assertDoesNotExist()
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "w412dp-h915dp")
+    fun workspaceBuildApkTab_displaysMediaPipeGeneratedOfflineTasksAndExpandsScript() {
+        val sampleProject = com.example.model.StudioProject(
+            id = "mediapipe-ui-tasks-test",
+            appName = "Offline Tasks App",
+            packageName = "com.example.offlinetasks",
+            prompt = "Test offline pipeline UI",
+            files = listOf(
+                com.example.model.GeneratedFile(
+                    path = "app/src/main/java/com/example/offlinetasks/MainActivity.kt",
+                    content = "package com.example.offlinetasks\nclass MainActivity"
+                ),
+                com.example.model.GeneratedFile(
+                    path = "gradle/offline-build-tasks.gradle.kts",
+                    content = "tasks.register(\"offlineBuildAndSignRelease\") { /* offline */ }"
+                )
+            )
+        )
+        val tasks = com.example.data.build.LocalMediaPipeBuildPipeline.defaultBuildTaskSpecs(
+            generatedByMediaPipe = true
+        )
+        val signingStatus = com.example.model.OfflineSigningStatus(
+            hasKeystore = true,
+            keyAlias = "release",
+            commonName = "Offline Tasks App",
+            sha256Fingerprint = "11:22:33:44:55:66",
+            aiEngineStatus = "Offline AI Ready (Qwen 2.5 0.5B)",
+            pipelineTasks = tasks,
+            pipelineTasksScript = "tasks.register(\"offlineBuildAndSignRelease\") {\n    group = \"offline-build\"\n}",
+            pipelineOriginLabel = "MediaPipe LLM • Qwen 2.5 0.5B",
+            pipelineLatencyMs = 420L
+        )
+
+        var openedFilePath = ""
+        composeRule.setContent {
+            AiAppStudioTheme(darkTheme = true) {
+                com.example.ui.screens.WorkspaceBuildApkTab(
+                    project = sampleProject,
+                    settings = com.example.model.StudioSettings(),
+                    gitState = com.example.model.GitRepoState(),
+                    hasGitHubPat = false,
+                    isGitBusy = false,
+                    isCloudBuildBusy = false,
+                    cloudBuildProgress = null,
+                    isOfflineBuildBusy = false,
+                    offlineBuildProgress = null,
+                    offlineBuildStreamPreview = "",
+                    offlineSigningStatus = signingStatus,
+                    onTriggerCloudBuild = {},
+                    onRefreshCloudBuildStatus = {},
+                    onNavigateToFile = { path, _ -> openedFilePath = path },
+                    onPackageZip = { null },
+                    onExportBuildLogs = { null },
+                    onInitGit = {},
+                    onRefreshGit = {},
+                    onStageFile = {},
+                    onUnstageFile = {},
+                    onStageAll = {},
+                    onCommitGit = {},
+                    onConfigureRemote = {},
+                    onPushGit = {},
+                    onPullGit = {},
+                    onOpenConsole = {},
+                    onOpenSettings = {}
+                )
+            }
+        }
+
+        val list = composeRule.onNodeWithTag("workspace_build_apk_tab")
+        list.performScrollToNode(hasTestTag("offline_pipeline_tasks_card"))
+        composeRule.onNodeWithTag("offline_pipeline_tasks_card").assertIsDisplayed()
+        composeRule.onNodeWithText("Local Compilation & Signing Tasks").assertIsDisplayed()
+        composeRule.onNodeWithText("0 GitHub").assertIsDisplayed()
+
+        list.performScrollToNode(hasTestTag("offline_task_offlineCompileReleaseApk"))
+        composeRule.onNodeWithText(":offlineCompileReleaseApk").assertIsDisplayed()
+        list.performScrollToNode(hasTestTag("offline_task_offlineSignReleaseApk"))
+        composeRule.onNodeWithText(":offlineSignReleaseApk").assertIsDisplayed()
+        list.performScrollToNode(hasTestTag("offline_task_offlineBuildAndSignRelease"))
+        composeRule.onNodeWithText(":offlineBuildAndSignRelease").assertIsDisplayed()
+
+        list.performScrollToNode(hasTestTag("toggle_offline_tasks_preview_button"))
+        composeRule.onNodeWithTag("toggle_offline_tasks_preview_button").performClick()
+        composeRule.waitForIdle()
+        list.performScrollToNode(hasTestTag("offline_pipeline_script_preview"))
+        composeRule.onNodeWithTag("offline_pipeline_script_preview").assertIsDisplayed()
+
+        list.performScrollToNode(hasTestTag("open_offline_gradle_tasks_file_button"))
+        composeRule.onNodeWithTag("open_offline_gradle_tasks_file_button").performClick()
+        assertEquals(
+            com.example.data.build.LocalMediaPipeBuildPipeline.GRADLE_PIPELINE_FILE_PATH,
+            openedFilePath
+        )
     }
 }

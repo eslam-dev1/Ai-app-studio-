@@ -282,4 +282,32 @@ data class ProjectSnapshot(
     val files: List<GeneratedFile> = emptyList()
 )
 
+@Immutable
+@Serializable
+data class OfflineBuildTaskSpec(
+    val name: String,
+    val category: String = "COMPILATION",
+    val command: String,
+    val description: String,
+    val generatedByMediaPipe: Boolean = false
+)
 
+@Immutable
+data class OfflineSigningStatus(
+    val hasKeystore: Boolean = false,
+    val keyAlias: String = "release",
+    val commonName: String = "",
+    val sha256Fingerprint: String = "",
+    val signedApkPath: String? = null,
+    val signedApkSizeBytes: Long = 0L,
+    val isSignatureVerified: Boolean = false,
+    val v1Signed: Boolean = false,
+    val v2Signed: Boolean = false,
+    val v3Signed: Boolean = false,
+    val aiEngineStatus: String = "",
+    val lastBuiltAtEpochMs: Long? = null,
+    val pipelineTasks: List<OfflineBuildTaskSpec> = emptyList(),
+    val pipelineTasksScript: String = "",
+    val pipelineOriginLabel: String = "",
+    val pipelineLatencyMs: Long = 0L
+)

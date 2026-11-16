@@ -433,25 +433,32 @@ fun ApkResourceAnalyzerCard(
                         .fillMaxWidth()
                         .height(10.dp)
                         .clip(RoundedCornerShape(5.dp))
+                        .background(palette.cardSurfaceHigh)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(metrics.dexPercentage.toFloat())
-                            .fillMaxWidth()
-                            .background(palette.accentCyan)
-                    )
-                    Box(
-                        modifier = Modifier
-                            .weight(metrics.resPercentage.toFloat())
-                            .fillMaxWidth()
-                            .background(palette.accentPurple)
-                    )
-                    Box(
-                        modifier = Modifier
-                            .weight(metrics.assetsPercentage.toFloat())
-                            .fillMaxWidth()
-                            .background(palette.accentEmerald)
-                    )
+                    if (metrics.dexPercentage > 0) {
+                        Box(
+                            modifier = Modifier
+                                .weight(metrics.dexPercentage.toFloat())
+                                .height(10.dp)
+                                .background(palette.accentCyan)
+                        )
+                    }
+                    if (metrics.resPercentage > 0) {
+                        Box(
+                            modifier = Modifier
+                                .weight(metrics.resPercentage.toFloat())
+                                .height(10.dp)
+                                .background(palette.accentPurple)
+                        )
+                    }
+                    if (metrics.assetsPercentage > 0) {
+                        Box(
+                            modifier = Modifier
+                                .weight(metrics.assetsPercentage.toFloat())
+                                .height(10.dp)
+                                .background(palette.accentEmerald)
+                        )
+                    }
                 }
             }
 

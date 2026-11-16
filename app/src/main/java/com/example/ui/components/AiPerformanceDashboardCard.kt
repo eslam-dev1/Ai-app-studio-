@@ -59,50 +59,12 @@ fun AiPerformanceDashboardCard(
     var isExpanded by rememberSaveable(project.id) { mutableStateOf(false) }
 
     val totalFiles = project.files.size
-    val totalLines = remember(project.files) {
-        project.files.sumOf { it.content.lines().size }
+    val profile = remember(project.files, project.lastGenerationLatencyMs, project.updatedAtEpochMs) {
+        com.example.diagnostics.CodeQuickActionEngine.analyzeProjectPerformance(project)
     }
-    val composableCount = remember(project.files) {
-        project.files.sumOf { file ->
-            file.content.lines().count { it.contains("@Composable") }
-        }
-    }
-
-    // Simulated / tracked metrics based on project complexity
-    val estimatedGenerationLatencyMs = remember(totalLines) {
-        (340L + totalLines * 1.8).toLong().coerceAtMost(3200L)
-    }
-    val tokenInferenceSpeedTps = remember(totalLines) {
-        if (totalLines > 200) 24.5 else 48.2
-    }
-    val efficiencyScore = remember(totalFiles, totalLines, composableCount) {
-        when {
-            totalLines < 150 -> 98
-            totalLines < 500 -> 91
-            else -> 84
-        }
-    }
-
-    val optimizationSuggestions = remember(project.files) {
-        val list = mutableListOf<String>()
-        val hasLargeLists = project.files.any { it.content.contains("Column {") && it.content.contains("for (") }
-        val hasHeavyState = project.files.any { it.content.contains("mutableStateOf") && !it.content.contains("derivedStateOf") }
-        val hasMissingImmutable = project.files.any { it.content.contains("data class") && !it.content.contains("@Immutable") }
-
-        if (hasLargeLists || composableCount > 6) {
-            list += "⚡ Use LazyColumn/LazyRow for scrollable lists to avoid excessive recompositions."
-        }
-        if (hasHeavyState) {
-            list += "💡 Memoize expensive calculations using remember { derivedStateOf { ... } }."
-        }
-        if (hasMissingImmutable) {
-            list += "🏎️ Annotate data models with @Immutable or @Stable for optimal Compose rendering."
-        }
-        if (list.isEmpty()) {
-            list += "✅ Codebase structure is clean and follows high-performance Compose patterns."
-        }
-        list
-    }
+    val totalLines = profile.totalLinesOfCode
+    val composableCount = profile.composableCount
+    val isMeasuredLatency = project.lastGenerationLatencyMs > 0L
 
     CyberGradientCard(
         cornerRadius = 18.dp,
@@ -142,7 +104,7 @@ fun AiPerformanceDashboardCard(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Efficiency Score: $efficiencyScore% • ${totalFiles} files • ${totalLines} LOC",
+                            text = "Efficiency Score: ${profile.efficiencyScore}% • ${totalFiles} files • $totalLines LOC • ${profile.complexityLabel}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -155,7 +117,7 @@ fun AiPerformanceDashboardCard(
                     border = BorderStroke(1.dp, palette.accentCyan)
                 ) {
                     Text(
-                        text = "$efficiencyScore%",
+                        text = "${profile.efficiencyScore}%",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = palette.accentCyan,
@@ -207,16 +169,21 @@ fun AiPerformanceDashboardCard(
                                     Text("Latency", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 Text(
-                                    text = "${estimatedGenerationLatencyMs} ms",
+                                    text = "${profile.generationLatencyMs} ms",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontFamily = JetBrainsMonoFamily,
                                     fontWeight = FontWeight.Bold
                                 )
-                                Text("Avg compilation pass", style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = palette.accentEmerald)
+                                Text(
+                                    text = if (isMeasuredLatency) "Measured generation time" else "Estimated AST pass",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = palette.accentEmerald
+                                )
                             }
                         }
 
-                        // Metric 2: Inference Speed
+                        // Metric 2: Inference Speed / Frame Budget
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = palette.cardSurfaceHigh,
@@ -234,15 +201,20 @@ fun AiPerformanceDashboardCard(
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     Icon(Icons.Default.Bolt, contentDescription = null, tint = palette.accentCyan, modifier = Modifier.size(14.dp))
-                                    Text("Speed", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("Throughput", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 Text(
-                                    text = String.format(Locale.US, "%.1f tps", tokenInferenceSpeedTps),
+                                    text = String.format(Locale.US, "%.1f tps", profile.tokenThroughputTps),
                                     style = MaterialTheme.typography.titleMedium,
                                     fontFamily = JetBrainsMonoFamily,
                                     fontWeight = FontWeight.Bold
                                 )
-                                Text("Model token throughput", style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = palette.accentCyan)
+                                Text(
+                                    text = String.format(Locale.US, "Est. frame %.1f ms", profile.estimatedFrameTimeMs),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = palette.accentCyan
+                                )
                             }
                         }
                     }
@@ -253,10 +225,18 @@ fun AiPerformanceDashboardCard(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text("Project Complexity Index", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("$composableCount @Composables • $totalLines LOC", style = MaterialTheme.typography.labelSmall, fontFamily = JetBrainsMonoFamily)
+                            Text(
+                                text = "Complexity (${profile.complexityLabel}: ${profile.complexityScore}/100)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "$composableCount @Composables • ${profile.stateHolderCount} States",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = JetBrainsMonoFamily
+                            )
                         }
-                        val complexityFraction = (totalLines / 1500f).coerceIn(0.1f, 1f)
+                        val complexityFraction = (profile.complexityScore / 100f).coerceIn(0.08f, 1f)
                         LinearProgressIndicator(
                             progress = { complexityFraction },
                             modifier = Modifier
@@ -267,13 +247,13 @@ fun AiPerformanceDashboardCard(
 
                     // Suggestions Section
                     Text(
-                        text = "Smart Optimization Insights",
+                        text = "AST Optimization Insights (${profile.insights.size})",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold
                     )
 
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        optimizationSuggestions.forEach { suggestion ->
+                        if (profile.insights.isEmpty()) {
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
                                 color = palette.cardSurfaceHigh,
@@ -281,10 +261,35 @@ fun AiPerformanceDashboardCard(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = suggestion,
+                                    text = "✅ Codebase follows Compose skippability, LazyList keys, and remember best practices.",
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.padding(10.dp)
                                 )
+                            }
+                        } else {
+                            profile.insights.take(5).forEach { insight ->
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = palette.cardSurfaceHigh,
+                                    border = BorderStroke(1.dp, palette.cardBorder),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        Text(
+                                            text = "[${insight.impactLevel}] ${insight.filePath.substringAfterLast('/')}:${insight.line} — ${insight.title}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = palette.accentCyan
+                                        )
+                                        Text(
+                                            text = insight.recommendation,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

@@ -62,6 +62,11 @@ fun AppNavGraph(
     val isGitBusy by studioViewModel.isGitBusy.collectAsStateWithLifecycle()
     val isCloudBuildBusy by studioViewModel.isCloudBuildBusy.collectAsStateWithLifecycle()
     val cloudBuildProgress by studioViewModel.cloudBuildProgress.collectAsStateWithLifecycle()
+    val isOfflineBuildBusy by studioViewModel.isOfflineBuildBusy.collectAsStateWithLifecycle()
+    val offlineBuildProgress by studioViewModel.offlineBuildProgress.collectAsStateWithLifecycle()
+    val offlineBuildStreamPreview by studioViewModel.offlineBuildStreamPreview.collectAsStateWithLifecycle()
+    val offlineSigningStatus by studioViewModel.offlineSigningStatus.collectAsStateWithLifecycle()
+    val isAutoFixingBuild by studioViewModel.isAutoFixingBuild.collectAsStateWithLifecycle()
     val isImportingModel by studioViewModel.isImportingModel.collectAsStateWithLifecycle()
     val deviceHardwareProfile by studioViewModel.deviceHardwareProfile.collectAsStateWithLifecycle()
     val localModelDownloadState by studioViewModel.localModelDownloadState.collectAsStateWithLifecycle()
@@ -208,6 +213,11 @@ fun AppNavGraph(
                         isGitBusy = isGitBusy,
                         isCloudBuildBusy = isCloudBuildBusy,
                         cloudBuildProgress = cloudBuildProgress,
+                        isOfflineBuildBusy = isOfflineBuildBusy,
+                        offlineBuildProgress = offlineBuildProgress,
+                        offlineBuildStreamPreview = offlineBuildStreamPreview,
+                        offlineSigningStatus = offlineSigningStatus,
+                        isAutoFixingBuild = isAutoFixingBuild,
                         onBack = {
                             studioViewModel.flushPendingAutoSave()
                             navController.popBackStack()
@@ -232,6 +242,15 @@ fun AppNavGraph(
                         onDismissRefactorSheet = studioViewModel::dismissRefactorSheet,
                         onRunCompilerCheck = studioViewModel::runStaticCompilerCheck,
                         onClearConsoleLogs = studioViewModel::clearConsoleLogs,
+                        onAutoFixProject = studioViewModel::autoFixActiveProject,
+                        onOptimizeProject = studioViewModel::optimizeActiveProject,
+                        onFixBuildWithAi = studioViewModel::fixBuildIssuesWithAi,
+                        onDownloadAndInstallApk = { studioViewModel.downloadReadyApkUri() },
+                        onTriggerOfflineAiBuildAndSign = studioViewModel::runOfflineAiBuildAndSign,
+                        onSignExternalApkOffline = { uri, alias, pass, cn ->
+                            studioViewModel.signExternalApkOffline(uri, alias, pass, cn)
+                        },
+                        onGetOfflineSignedApkUri = { studioViewModel.getOfflineSignedApkInstallUri() },
                         onPackageZip = { studioViewModel.exportActiveProjectZip() },
                         onExportBuildLogs = { studioViewModel.exportBuildLogs() },
                         onInitGit = studioViewModel::initGitRepository,

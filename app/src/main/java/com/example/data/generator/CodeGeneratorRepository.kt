@@ -149,10 +149,12 @@ class CodeGeneratorRepository(context: Context) : AutoCloseable {
 
     suspend fun runLocalPromptBenchmarkStep(
         savedModelPath: String,
-        prompt: String
+        prompt: String,
+        onStreamToken: (String) -> Unit = {}
     ): Pair<String, Long> = onDeviceGenerator.runRawPrompt(
         savedModelPath = savedModelPath,
-        prompt = prompt
+        prompt = prompt,
+        onStreamToken = onStreamToken
     )
 
     override fun close() {

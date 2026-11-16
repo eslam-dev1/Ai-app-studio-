@@ -90,12 +90,16 @@ object FactoryTelemetryCalculator {
         }
 
         return when {
-            lower.contains("diagnostic") || lower.contains("authenticat") || lower.contains("preparing github") ->
+            lower.contains("pre-build") || lower.contains("diagnostic") || lower.contains("authenticat") || lower.contains("preparing github") ->
                 CloudBuildTelemetry(BuildPhase.PROMPTING, 0.18f, msg)
-            lower.contains("creating github") ->
-                CloudBuildTelemetry(BuildPhase.PROMPTING, 0.26f, msg)
+            lower.contains("creating github") || lower.contains("keystore") ->
+                CloudBuildTelemetry(BuildPhase.PROMPTING, 0.34f, msg)
+            lower.contains("mediapipe") || lower.contains("generating offline") || lower.contains("repairing") ->
+                CloudBuildTelemetry(BuildPhase.GENERATING_CODE, 0.62f, msg)
             lower.contains("push") || lower.contains("upload") ->
                 CloudBuildTelemetry(BuildPhase.GENERATING_CODE, 0.52f, msg)
+            lower.contains("signing apk") || lower.contains("apksig") ->
+                CloudBuildTelemetry(BuildPhase.PACKAGING_APK, 0.88f, msg)
             lower.contains("download") ->
                 CloudBuildTelemetry(BuildPhase.PACKAGING_APK, 0.90f, msg)
             lower.contains("trigger") || lower.contains("workflow") || lower.contains("checking github") ->

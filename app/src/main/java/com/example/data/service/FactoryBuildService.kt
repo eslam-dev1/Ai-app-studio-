@@ -151,6 +151,29 @@ class FactoryBuildService : Service() {
             notificationManager?.notify(NOTIFICATION_ID + 1, notification)
         }
 
+        fun showErrorNotification(context: Context, title: String, message: String) {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            val openIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pendingOpenIntent = PendingIntent.getActivity(
+                context,
+                0,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            )
+            createChannelIfNeeded(context)
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                .setSmallIcon(android.R.drawable.stat_notify_error)
+                .setContentIntent(pendingOpenIntent)
+                .setAutoCancel(true)
+                .build()
+            notificationManager?.notify(NOTIFICATION_ID + 2, notification)
+        }
+
         @SuppressLint("UnspecifiedImmutableFlag")
         private fun buildNotification(
             context: Context,

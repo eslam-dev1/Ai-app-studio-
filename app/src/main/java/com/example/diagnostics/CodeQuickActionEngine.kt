@@ -86,12 +86,16 @@ object CodeQuickActionEngine {
         Regex("\\b(Button|OutlinedButton|FilledTonalButton|Text|Card|ElevatedCard|OutlinedCard|Scaffold|TopAppBar|OutlinedTextField|Icon|IconButton|Surface|MaterialTheme|CircularProgressIndicator|LinearProgressIndicator|HorizontalDivider|VerticalDivider|Switch|FilterChip|AssistChip)\\b") to "androidx.compose.material3.*",
         Regex("\\b(Modifier|testTag)\\b") to "androidx.compose.ui.Modifier",
         Regex("\\btestTag\\b") to "androidx.compose.ui.platform.testTag",
-        Regex("\\b\\d+\\.(dp|sp)\\b") to "androidx.compose.ui.unit.dp",
+        Regex("\\b\\d+(\\.\\d+)?\\.dp\\b") to "androidx.compose.ui.unit.dp",
+        Regex("\\b\\d+(\\.\\d+)?\\.sp\\b") to "androidx.compose.ui.unit.sp",
         Regex("\\bIcons\\.Default\\b") to "androidx.compose.material.icons.Icons",
         Regex("\\bIcons\\.Default\\.[A-Za-z0-9]+\\b") to "androidx.compose.material.icons.filled.*",
         Regex("\\bColor\\b") to "androidx.compose.ui.graphics.Color",
         Regex("\\bAlignment\\b") to "androidx.compose.ui.Alignment",
-        Regex("\\b(FontWeight|TextAlign|TextOverflow|TextStyle)\\b") to "androidx.compose.ui.text.font.FontWeight",
+        Regex("\\bFontWeight\\b") to "androidx.compose.ui.text.font.FontWeight",
+        Regex("\\bTextAlign\\b") to "androidx.compose.ui.text.style.TextAlign",
+        Regex("\\bTextOverflow\\b") to "androidx.compose.ui.text.style.TextOverflow",
+        Regex("\\bTextStyle\\b") to "androidx.compose.ui.text.TextStyle",
         Regex("\\b(Dispatchers|withContext|launch)\\b") to "kotlinx.coroutines.*"
     )
 
@@ -151,12 +155,8 @@ object CodeQuickActionEngine {
             appliedFixes.add("Injected ${missingImports.size} missing imports (${missingImports.take(3).joinToString()}${if (missingImports.size > 3) "…" else ""})")
         }
 
-        // 4. Balance single unclosed brace if detected at end
-        var openBraces = 0
-        lines.forEach { line ->
-            openBraces += line.count { it == '{' }
-            openBraces -= line.count { it == '}' }
-        }
+        // 4. Balance unclosed braces while ignoring string literals and comments
+        val openBraces = countUnclosedCodeBraces(lines)
         if (openBraces > 0 && openBraces <= 2) {
             repeat(openBraces) {
                 lines.add("}")
@@ -166,6 +166,61 @@ object CodeQuickActionEngine {
 
         val updatedCode = lines.joinToString("\n")
         return updatedCode to appliedFixes
+    }
+
+    private fun countUnclosedCodeBraces(lines: List<String>): Int {
+        var balance = 0
+        var inBlockComment = false
+        var inTripleQuote = false
+
+        for (rawLine in lines) {
+            var i = 0
+            var inString = false
+            while (i < rawLine.length) {
+                if (inBlockComment) {
+                    if (i + 1 < rawLine.length && rawLine[i] == '*' && rawLine[i + 1] == '/') {
+                        inBlockComment = false
+                        i += 2
+                    } else {
+                        i++
+                    }
+                    continue
+                }
+                if (!inString && i + 2 < rawLine.length &&
+                    rawLine[i] == '"' && rawLine[i + 1] == '"' && rawLine[i + 2] == '"'
+                ) {
+                    inTripleQuote = !inTripleQuote
+                    i += 3
+                    continue
+                }
+                if (inTripleQuote) {
+                    i++
+                    continue
+                }
+                if (!inString && i + 1 < rawLine.length && rawLine[i] == '/' && rawLine[i + 1] == '/') {
+                    break
+                }
+                if (!inString && i + 1 < rawLine.length && rawLine[i] == '/' && rawLine[i + 1] == '*') {
+                    inBlockComment = true
+                    i += 2
+                    continue
+                }
+                val ch = rawLine[i]
+                if (ch == '"' && (i == 0 || rawLine[i - 1] != '\\')) {
+                    inString = !inString
+                    i++
+                    continue
+                }
+                if (!inString) {
+                    when (ch) {
+                        '{' -> balance++
+                        '}' -> balance--
+                    }
+                }
+                i++
+            }
+        }
+        return balance
     }
 
     fun autoFixProject(project: StudioProject): Pair<StudioProject, List<String>> {
@@ -396,10 +451,10 @@ object CodeQuickActionEngine {
         val applied = mutableListOf<String>()
         val lines = code.lines().toMutableList()
 
-        // 1. Add key to items() where feasible
+        // 1. Add key to items() where feasible with valid Kotlin named arguments
         lines.forEachIndexed { idx, line ->
             if (line.contains("items(") && !line.contains("key =") && !line.contains("key=")) {
-                val updatedLine = line.replaceFirst("items(", "items(key = { it.hashCode() }, ")
+                val updatedLine = rewriteItemsCallWithKey(line)
                 if (updatedLine != line) {
                     lines[idx] = updatedLine
                     applied.add("Line ${idx + 1}: Added key parameter to LazyColumn/Row items")
@@ -586,8 +641,10 @@ object CodeQuickActionEngine {
 
     fun analyzeApkMetrics(project: StudioProject): ApkMetricsData {
         val ktFiles = project.files.filter { it.path.endsWith(".kt", ignoreCase = true) }
+        val javaFiles = project.files.filter { it.path.endsWith(".java", ignoreCase = true) }
+        val codeFiles = ktFiles + javaFiles
         val xmlFiles = project.files.filter { it.path.endsWith(".xml", ignoreCase = true) }
-        val totalLines = ktFiles.sumOf { it.content.lines().size } + xmlFiles.sumOf { it.content.lines().size }
+        val totalLines = codeFiles.sumOf { it.content.lines().size } + xmlFiles.sumOf { it.content.lines().size }
 
         val composableMatches = ktFiles.sumOf { file ->
             Regex("@Composable").findAll(file.content).count()
@@ -595,31 +652,162 @@ object CodeQuickActionEngine {
 
         val manifestFile = xmlFiles.firstOrNull { it.path.endsWith("AndroidManifest.xml", ignoreCase = true) }
         val permissions = manifestFile?.let { mf ->
-            Regex("<uses-permission[^>]+android:name=\"([^\"]+)\"").findAll(mf.content)
+            Regex("<uses-permission[^>]+android:name\\s*=\\s*\"([^\"]+)\"").findAll(mf.content)
                 .map { it.groupValues[1].substringAfterLast('.') }
+                .distinct()
                 .toList()
-        } ?: listOf("INTERNET", "ACCESS_NETWORK_STATE")
+        } ?: emptyList()
 
-        val gradleFile = project.files.firstOrNull { it.path.endsWith(".gradle.kts") || it.path.endsWith(".gradle") }
-        val depCount = gradleFile?.let { gf ->
-            Regex("(implementation|api)\\s*\\(").findAll(gf.content).count()
-        } ?: 12
+        val gradleFiles = project.files.filter {
+            it.path.endsWith(".gradle.kts", ignoreCase = true) || it.path.endsWith(".gradle", ignoreCase = true)
+        }
+        val depRegex = Regex("""^\s*(implementation|api|ksp|kapt|compileOnly|runtimeOnly)\s*(\(|\s+['"])""")
+        val depCount = gradleFiles.sumOf { gf ->
+            gf.content.lines().count { line -> depRegex.containsMatchIn(line) }
+        }
 
-        // Compose APK baseline: ~3.8MB + ~0.08MB per Kotlin screen + resource overhead
-        val estimatedSize = 3.6 + (ktFiles.size * 0.05) + (xmlFiles.size * 0.02)
+        // Compute real byte weights for DEX (compiled Kotlin/Java + Gradle deps baseline), RES, and ASSETS
+        val codeBytes = codeFiles.sumOf { it.content.toByteArray(Charsets.UTF_8).size.toLong() }
+        val assetBytes = project.files.filter { file ->
+            val lower = file.path.lowercase()
+            lower.contains("/assets/") || lower.startsWith("assets/") ||
+                lower.contains("res/font") ||
+                com.example.ui.assets.ProjectResAssetManager.isBinaryEncodedContent(file.content)
+        }.sumOf { file ->
+            com.example.ui.assets.ProjectResAssetManager.decodeBinaryContent(file.content)?.size?.toLong()
+                ?: file.content.toByteArray(Charsets.UTF_8).size.toLong()
+        }
+        val resBytes = project.files.filter { file ->
+            val lower = file.path.lowercase()
+            (lower.contains("/res/") || lower.startsWith("res/")) &&
+                !lower.contains("res/font") &&
+                !com.example.ui.assets.ProjectResAssetManager.isBinaryEncodedContent(file.content)
+        }.sumOf { it.content.toByteArray(Charsets.UTF_8).size.toLong() }
+
+        val effectiveDexWeight = (codeBytes + depCount * 120_000L).coerceAtLeast(if (codeFiles.isNotEmpty()) 1L else 0L)
+        val effectiveResWeight = resBytes
+        val effectiveAssetWeight = assetBytes
+        val totalWeight = (effectiveDexWeight + effectiveResWeight + effectiveAssetWeight).coerceAtLeast(1L)
+
+        var dexPct = ((effectiveDexWeight * 100.0) / totalWeight).toInt()
+        var resPct = ((effectiveResWeight * 100.0) / totalWeight).toInt()
+        var assetsPct = ((effectiveAssetWeight * 100.0) / totalWeight).toInt()
+        val remainder = 100 - (dexPct + resPct + assetsPct)
+        if (remainder != 0) {
+            when {
+                effectiveDexWeight >= effectiveResWeight && effectiveDexWeight >= effectiveAssetWeight -> dexPct += remainder
+                effectiveResWeight >= effectiveAssetWeight -> resPct += remainder
+                else -> assetsPct += remainder
+            }
+        }
+
+        // Compose runtime baseline + actual project source/dependency footprint
+        val rawAssetsAndResMb = (codeBytes + resBytes + assetBytes) / (1024.0 * 1024.0)
+        val estimatedSize = 3.2 + (depCount * 0.14) + (ktFiles.size * 0.04) + (xmlFiles.size * 0.015) + rawAssetsAndResMb
 
         return ApkMetricsData(
             totalLinesOfCode = totalLines,
             kotlinFileCount = ktFiles.size,
             xmlFileCount = xmlFiles.size,
-            composableCount = composableMatches.coerceAtLeast(1),
+            composableCount = composableMatches,
             declaredPermissions = permissions,
-            gradleDependenciesCount = depCount.coerceAtLeast(8),
+            gradleDependenciesCount = depCount,
             estimatedApkSizeMb = String.format(java.util.Locale.US, "%.2f", estimatedSize).toDouble(),
-            dexPercentage = 54,
-            resPercentage = 28,
-            assetsPercentage = 18
+            dexPercentage = dexPct.coerceIn(0, 100),
+            resPercentage = resPct.coerceIn(0, 100),
+            assetsPercentage = assetsPct.coerceIn(0, 100)
         )
+    }
+
+    private fun rewriteItemsCallWithKey(line: String): String {
+        val match = Regex("""\bitems\s*\(""").find(line) ?: return line
+        val openParenIdx = match.range.last
+        var depth = 1
+        var inString = false
+        var closeParenIdx = -1
+        for (i in (openParenIdx + 1) until line.length) {
+            val c = line[i]
+            if (c == '"' && (i == 0 || line[i - 1] != '\\')) {
+                inString = !inString
+                continue
+            }
+            if (!inString) {
+                if (c == '(') depth++
+                else if (c == ')') {
+                    depth--
+                    if (depth == 0) {
+                        closeParenIdx = i
+                        break
+                    }
+                }
+            }
+        }
+        if (closeParenIdx <= openParenIdx + 1) return line
+        val argsRaw = line.substring(openParenIdx + 1, closeParenIdx).trim()
+        if (argsRaw.isBlank()) return line
+
+        // Split top-level args outside parens/braces/brackets/strings
+        val topArgs = mutableListOf<String>()
+        var argStart = 0
+        var pDepth = 0
+        var bDepth = 0
+        var sDepth = 0
+        var qInString = false
+        for (i in argsRaw.indices) {
+            val c = argsRaw[i]
+            if (c == '"' && (i == 0 || argsRaw[i - 1] != '\\')) {
+                qInString = !qInString
+                continue
+            }
+            if (!qInString) {
+                when (c) {
+                    '(' -> pDepth++
+                    ')' -> pDepth--
+                    '{' -> bDepth++
+                    '}' -> bDepth--
+                    '[' -> sDepth++
+                    ']' -> sDepth--
+                    ',' -> if (pDepth == 0 && bDepth == 0 && sDepth == 0) {
+                        topArgs += argsRaw.substring(argStart, i).trim()
+                        argStart = i + 1
+                    }
+                }
+            }
+        }
+        topArgs += argsRaw.substring(argStart).trim()
+
+        val firstArg = topArgs.firstOrNull().orEmpty()
+        if (firstArg.isBlank()) return line
+
+        val isCountCall = firstArg.all { it.isDigit() } || firstArg.startsWith("count")
+        val keyExpr = if (isCountCall) "key = { it }" else "key = { it.hashCode() }"
+
+        val rewrittenArgs = if (topArgs.size == 1 && !firstArg.contains("=")) {
+            if (isCountCall) "count = $firstArg, $keyExpr"
+            else "items = $firstArg, $keyExpr"
+        } else if (topArgs.all { arg ->
+                // Check if arg has a top-level '='
+                var d = 0
+                var str = false
+                var hasEq = false
+                for (ch in arg) {
+                    if (ch == '"') str = !str
+                    else if (!str) {
+                        if (ch == '(' || ch == '{') d++
+                        else if (ch == ')' || ch == '}') d--
+                        else if (ch == '=' && d == 0) { hasEq = true; break }
+                    }
+                }
+                hasEq
+            }) {
+            "$argsRaw, $keyExpr"
+        } else {
+            val namedFirst = if (firstArg.contains("=")) firstArg else if (isCountCall) "count = $firstArg" else "items = $firstArg"
+            val rest = topArgs.drop(1).joinToString(", ")
+            if (rest.isBlank()) "$namedFirst, $keyExpr" else "$namedFirst, $keyExpr, $rest"
+        }
+
+        return line.substring(0, openParenIdx + 1) + rewrittenArgs + line.substring(closeParenIdx)
     }
 
     private fun inferPackageFromPath(path: String): String {

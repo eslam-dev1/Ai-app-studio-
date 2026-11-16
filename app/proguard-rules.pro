@@ -1,21 +1,33 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Turbo Rocket Mode ProGuard Rules
+# MediaPipe GenAI & Task Library
+-keep class com.google.mediapipe.tasks.** { * }
+-dontwarn com.google.mediapipe.tasks.**
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Jetpack Compose & UI
+-keep class androidx.compose.** { * }
+-dontwarn androidx.compose.**
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Kotlinx Serialization & Data Classes
+-keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod
+-keepclassmembers class * {
+    @kotlinx.serialization.Serializable <fields>;
+}
+-keep class kotlinx.serialization.** { * }
+-dontwarn kotlinx.serialization.**
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Retrofit & OkHttp
+-keep class retrofit2.** { * }
+-keep class okhttp3.** { * }
+-dontwarn retrofit2.**
+-dontwarn okhttp3.**
+
+# Room Database
+-keep class androidx.room.** { * }
+-dontwarn androidx.room.**
+
+# JGit
+-keep class org.eclipse.jgit.** { * }
+-dontwarn org.eclipse.jgit.**
+
+# Preserve SourceFile and LineNumberTable for crash reporting if needed
+-keepattributes SourceFile,LineNumberTable

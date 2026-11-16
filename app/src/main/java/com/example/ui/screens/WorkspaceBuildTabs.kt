@@ -3,6 +3,9 @@ package com.example.ui.screens
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
@@ -25,17 +28,22 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.BuildCircle
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.InstallMobile
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Source
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,6 +54,10 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -68,17 +80,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.build.LocalMediaPipeBuildPipeline
+import com.example.data.build.OfflineApkBuildAndSignEngine
 import com.example.data.github.GitHubBuildRepository
-import com.example.diagnostics.CloudBuildTelemetry
 import com.example.diagnostics.FactoryTelemetryCalculator
-import com.example.model.BuildPhase
 import com.example.model.GitRepoState
+import com.example.model.OfflineSigningStatus
 import com.example.model.StudioProject
 import com.example.model.StudioSettings
 import com.example.ui.components.AiPerformanceDashboardCard
 import com.example.ui.components.ApkBrandingStudioCard
+import com.example.ui.components.ApkResourceAnalyzerCard
 import com.example.ui.components.CyberCodeFactoryCard
 import com.example.ui.components.CyberGradientCard
+import com.example.ui.components.PreBuildLinterCard
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.LocalStudioCyberPalette
 import java.io.File
@@ -95,11 +110,23 @@ fun WorkspaceBuildApkTab(
     isGitBusy: Boolean,
     isCloudBuildBusy: Boolean,
     cloudBuildProgress: String?,
+    isOfflineBuildBusy: Boolean = false,
+    offlineBuildProgress: String? = null,
+    offlineBuildStreamPreview: String = "",
+    offlineSigningStatus: OfflineSigningStatus = OfflineSigningStatus(),
+    isAutoFixingBuild: Boolean = false,
     onTriggerCloudBuild: () -> Unit,
     onRefreshCloudBuildStatus: () -> Unit,
-    onPackageZip: suspend () -> android.net.Uri?,
-    onExportBuildLogs: suspend () -> android.net.Uri?,
+    onDownloadAndInstallApk: suspend () -> Uri? = { null },
+    onTriggerOfflineAiBuildAndSign: (keyAlias: String, storePassword: String, commonName: String) -> Unit = { _, _, _ -> },
+    onSignExternalApkOffline: suspend (apkUri: Uri, keyAlias: String, storePassword: String, commonName: String) -> Uri? = { _, _, _, _ -> null },
+    onGetOfflineSignedApkUri: () -> Uri? = { null },
+    onPackageZip: suspend () -> Uri?,
+    onExportBuildLogs: suspend () -> Uri?,
     onAutoFixProject: () -> Unit = {},
+    onOptimizeProject: () -> Unit = {},
+    onFixBuildWithAi: () -> Unit = {},
+    onNavigateToFile: (filePath: String, lineNumber: Int) -> Unit = { _, _ -> },
     onSaveBranding: (
         appName: String,
         packageId: String,
@@ -127,17 +154,62 @@ fun WorkspaceBuildApkTab(
     var isPackagingZip by remember { mutableStateOf(false) }
     var showGitSection by rememberSaveable { mutableStateOf(false) }
     var showWorkflowPreview by rememberSaveable { mutableStateOf(false) }
-    var showBuildAnimationPreview by rememberSaveable { mutableStateOf(false) }
+    // 0 = Offline AI & Local Signer, 1 = GitHub Actions Cloud CI
+    var buildModeIndex by rememberSaveable(project.id) {
+        mutableStateOf(if (!hasGitHubPat || offlineSigningStatus.hasKeystore) 0 else 1)
+    }
+    var signingAlias by rememberSaveable(project.id) {
+        mutableStateOf(offlineSigningStatus.keyAlias.ifBlank { OfflineApkBuildAndSignEngine.DEFAULT_KEY_ALIAS })
+    }
+    var signingPassword by rememberSaveable(project.id) {
+        mutableStateOf(OfflineApkBuildAndSignEngine.DEFAULT_KEY_PASSWORD)
+    }
+    var signingCommonName by rememberSaveable(project.id) {
+        mutableStateOf(offlineSigningStatus.commonName.ifBlank { project.appName })
+    }
+    var showSigningConfigFields by rememberSaveable(project.id) { mutableStateOf(false) }
+    var showPipelineTasksCode by rememberSaveable(project.id) { mutableStateOf(false) }
+
+    val launchApkInstaller: (Uri) -> Unit = { apkUri ->
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { context.startActivity(installIntent) }
+    }
+
+    val pickApkToSignLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { selectedUri ->
+        if (selectedUri != null) {
+            scope.launch {
+                onOpenConsole()
+                val signedUri = onSignExternalApkOffline(
+                    selectedUri,
+                    signingAlias,
+                    signingPassword,
+                    signingCommonName
+                )
+                if (signedUri != null) {
+                    launchApkInstaller(signedUri)
+                }
+            }
+        }
+    }
 
     val workflowPreview = remember(project.appName) {
         GitHubBuildRepository.buildApkWorkflowYaml(project.appName)
     }
     val hasArtifactReady = !project.lastArtifactUrl.isNullOrBlank()
+    val hasOfflineSignedApk = !offlineSigningStatus.signedApkPath.isNullOrBlank()
+    val isAnyBuildBusy = isCloudBuildBusy || isOfflineBuildBusy
     val buildStatusText = when {
+        isOfflineBuildBusy -> offlineBuildProgress ?: "Running Offline AI Build & PKCS12 Signing…"
+        isCloudBuildBusy -> cloudBuildProgress ?: "Running Cloud Gradle Build…"
+        hasOfflineSignedApk && buildModeIndex == 0 -> "Offline Signed APK Ready (v1/v2/v3 Verified)"
         hasArtifactReady -> "APK Ready"
         !project.lastBuildStatus.isNullOrBlank() -> project.lastBuildStatus
-        isCloudBuildBusy -> cloudBuildProgress ?: "Running Cloud Gradle Build…"
-        else -> "Ready to Build Debug APK"
+        else -> "Ready to Build & Sign APK"
     }
 
     val hasBuildError = remember(project.lastBuildStatus) {
@@ -153,7 +225,7 @@ fun WorkspaceBuildApkTab(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // Auto-Fix Error Loop ("Smart Self-Healing") Banner for APK Builder Pipeline
-        if (hasBuildError) {
+        if (hasBuildError || isAutoFixingBuild) {
             item {
                 CyberGradientCard(
                     cornerRadius = 16.dp,
@@ -175,48 +247,73 @@ fun WorkspaceBuildApkTab(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                                color = palette.accentPurple
-                            )
+                            if (isAutoFixingBuild) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = palette.accentPurple
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = "Build issue detected",
+                                    tint = Color(0xFFF59E0B),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
                             Column {
                                 Text(
-                                    text = "Issue detected — Auto-fixing with AI...",
+                                    text = if (isAutoFixingBuild) "Auto-fixing issues with AI…" else "Build Issue Detected",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = palette.accentCyan
                                 )
                                 Text(
-                                    text = project.lastBuildStatus ?: "Build failure detected. Self-healing ready.",
+                                    text = project.lastBuildStatus ?: "Build failure detected. Run self-healing to repair.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
+                                    maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
 
+                        Spacer(modifier = Modifier.width(8.dp))
+
                         Button(
                             onClick = {
                                 onOpenConsole()
-                                onTriggerCloudBuild()
+                                onFixBuildWithAi()
                             },
+                            enabled = !isAutoFixingBuild && !isAnyBuildBusy,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = palette.accentCyan,
                                 contentColor = Color(0xFF031018)
                             ),
                             modifier = Modifier
-                                .defaultMinSize(minHeight = 40.dp)
+                                .defaultMinSize(minHeight = 48.dp)
                                 .testTag("apk_builder_fix_with_ai_button")
                         ) {
                             Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Fix with AI", fontWeight = FontWeight.Bold)
+                            Text(if (isAutoFixingBuild) "Fixing…" else "Fix with AI", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
             }
+        }
+
+        // Pre-Build Static Linter & APK Metrics Analyzer
+        item {
+            PreBuildLinterCard(
+                project = project,
+                onAutoFixProject = onAutoFixProject,
+                onNavigateToFile = onNavigateToFile
+            )
+        }
+
+        item {
+            ApkResourceAnalyzerCard(project = project)
         }
 
         // Real-Time RAM & Storage Monitor Overlay for MediaPipe / Build performance
@@ -228,34 +325,44 @@ fun WorkspaceBuildApkTab(
         item {
             AiPerformanceDashboardCard(
                 project = project,
-                onOptimizeProject = onAutoFixProject
+                onOptimizeProject = onOptimizeProject
             )
         }
 
-        // 1. Live Animated Code Factory Card while building APK or previewing CI pipeline
-        if (isCloudBuildBusy || showBuildAnimationPreview) {
+        // 1. Live Animated Code Factory Card while Offline AI or Cloud CI APK build/sign is active
+        if (isAnyBuildBusy) {
             item {
-                val telemetry = if (isCloudBuildBusy) {
-                    FactoryTelemetryCalculator.resolveCloudApkBuildTelemetry(cloudBuildProgress)
-                } else {
-                    CloudBuildTelemetry(
-                        buildPhase = BuildPhase.PACKAGING_APK,
-                        progress = 0.85f,
-                        statusTicker = "Inspecting GitHub Actions APK workflow…"
-                    )
+                val activeProgressMsg = if (isOfflineBuildBusy) offlineBuildProgress else cloudBuildProgress
+                val telemetry = FactoryTelemetryCalculator.resolveCloudApkBuildTelemetry(activeProgressMsg)
+                val offlineCodePreview = remember(
+                    offlineBuildStreamPreview,
+                    project.appName,
+                    signingAlias,
+                    offlineSigningStatus.sha256Fingerprint
+                ) {
+                    offlineBuildStreamPreview.ifBlank {
+                        """
+                        # MediaPipe LLM Local Build Pipeline (Zero GitHub Actions)
+                        signingConfigs.release {
+                            storeFile = file("signing-release.p12")
+                            storeType = "PKCS12"
+                            keyAlias = "$signingAlias"
+                        }
+                        tasks.register("offlineCompileReleaseApk") { /* --offline */ }
+                        tasks.register("offlineSignReleaseApk") { /* apksig v1+v2+v3 */ }
+                        """.trimIndent()
+                    }
                 }
                 CyberCodeFactoryCard(
                     projectName = project.appName,
                     stepIndex = telemetry.buildPhase.nodeIndex,
                     totalSteps = 3,
                     stepMessage = telemetry.statusTicker,
-                    engineLabel = "GitHub Actions • Gradle 8",
-                    streamingCode = workflowPreview,
+                    engineLabel = if (isOfflineBuildBusy) "MediaPipe LLM • Offline Pipeline" else "GitHub Actions • Gradle 8",
+                    streamingCode = if (isOfflineBuildBusy) offlineCodePreview else workflowPreview,
                     buildPhase = telemetry.buildPhase,
                     progress = telemetry.progress,
-                    onCancel = if (showBuildAnimationPreview && !isCloudBuildBusy) {
-                        { showBuildAnimationPreview = false }
-                    } else null
+                    onCancel = null
                 )
             }
         }
@@ -312,23 +419,67 @@ fun WorkspaceBuildApkTab(
 
                         Surface(
                             shape = RoundedCornerShape(50),
-                            color = if (hasArtifactReady) {
+                            color = if (hasOfflineSignedApk || hasArtifactReady) {
                                 palette.accentEmerald.copy(alpha = 0.16f)
                             } else {
                                 palette.cardSurfaceHigh
                             },
                             border = BorderStroke(
                                 1.dp,
-                                if (hasArtifactReady) palette.accentEmerald else palette.cardBorder
+                                if (hasOfflineSignedApk || hasArtifactReady) palette.accentEmerald else palette.cardBorder
                             )
                         ) {
                             Text(
-                                text = if (hasArtifactReady) "APK Ready" else "Cloud CI",
+                                text = when {
+                                    hasOfflineSignedApk && buildModeIndex == 0 -> "Signed Offline"
+                                    offlineSigningStatus.hasKeystore && buildModeIndex == 0 -> "PKCS12 Ready"
+                                    buildModeIndex == 0 -> "Offline AI"
+                                    hasArtifactReady -> "APK Ready"
+                                    else -> "Cloud CI"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
-                                color = if (hasArtifactReady) palette.accentEmerald else palette.accentCyan,
+                                color = if (hasOfflineSignedApk || hasArtifactReady) palette.accentEmerald else palette.accentCyan,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                             )
+                        }
+                    }
+
+                    // Build Engine Switcher: Offline AI & Signer vs GitHub Cloud CI
+                    SingleChoiceSegmentedButtonRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("build_engine_selector")
+                    ) {
+                        SegmentedButton(
+                            selected = buildModeIndex == 0,
+                            onClick = { buildModeIndex = 0 },
+                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.VerifiedUser,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            modifier = Modifier.testTag("build_mode_offline_ai")
+                        ) {
+                            Text("Offline AI & Sign", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        SegmentedButton(
+                            selected = buildModeIndex == 1,
+                            onClick = { buildModeIndex = 1 },
+                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.Cloud,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            modifier = Modifier.testTag("build_mode_github_cloud")
+                        ) {
+                            Text("GitHub Cloud", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
 
@@ -349,13 +500,13 @@ fun WorkspaceBuildApkTab(
                                 text = buildStatusText,
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = JetBrainsMonoFamily,
-                                color = if (hasArtifactReady) palette.accentEmerald else MaterialTheme.colorScheme.onSurface,
+                                color = if (hasOfflineSignedApk || hasArtifactReady) palette.accentEmerald else MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.weight(1f)
                             )
-                            if (project.gitHubRepoUrl != null) {
+                            if (buildModeIndex == 1 && project.gitHubRepoUrl != null) {
                                 OutlinedButton(
                                     onClick = onRefreshCloudBuildStatus,
-                                    enabled = !isCloudBuildBusy,
+                                    enabled = !isAnyBuildBusy,
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                     modifier = Modifier.defaultMinSize(minHeight = 40.dp)
                                 ) {
@@ -367,114 +518,508 @@ fun WorkspaceBuildApkTab(
                         }
                     }
 
-                    // Prominent "Build & Install APK" CTA
-                    Button(
-                        onClick = {
-                            if (hasArtifactReady) {
-                                uriHandler.openUri(project.lastArtifactUrl!!)
-                            } else {
-                                onOpenConsole()
-                                onTriggerCloudBuild()
+                    if (buildModeIndex == 0) {
+                        // Offline AI Readiness + Keystore Certificate Summary
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = palette.cardSurfaceHigh.copy(alpha = 0.7f),
+                            border = BorderStroke(1.dp, palette.cardBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Memory,
+                                            contentDescription = null,
+                                            tint = palette.accentCyan,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = offlineSigningStatus.aiEngineStatus.ifBlank { "Offline AI & Static Analyzer Ready" },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = { showSigningConfigFields = !showSigningConfigFields },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                    ) {
+                                        Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(if (showSigningConfigFields) "Hide Key" else "Key Config", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+
+                                if (offlineSigningStatus.hasKeystore && offlineSigningStatus.sha256Fingerprint.isNotBlank()) {
+                                    Text(
+                                        text = "PKCS12 Alias: ${offlineSigningStatus.keyAlias} • SHA-256: ${offlineSigningStatus.sha256Fingerprint.take(35)}…",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = JetBrainsMonoFamily,
+                                        color = palette.accentEmerald,
+                                        modifier = Modifier.testTag("offline_keystore_fingerprint_text")
+                                    )
+                                }
+
+                                AnimatedVisibility(visible = showSigningConfigFields) {
+                                    Column(
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            OutlinedTextField(
+                                                value = signingAlias,
+                                                onValueChange = { signingAlias = it },
+                                                label = { Text("Key Alias") },
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("offline_signing_alias_input")
+                                            )
+                                            OutlinedTextField(
+                                                value = signingPassword,
+                                                onValueChange = { signingPassword = it },
+                                                label = { Text("Keystore Pass") },
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("offline_signing_password_input")
+                                            )
+                                        }
+                                        OutlinedTextField(
+                                            value = signingCommonName,
+                                            onValueChange = { signingCommonName = it },
+                                            label = { Text("Certificate Owner (CN)") },
+                                            singleLine = true,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("offline_signing_owner_input")
+                                        )
+                                    }
+                                }
+
+                                if (hasOfflineSignedApk && offlineSigningStatus.isSignatureVerified) {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        listOfNotNull(
+                                            if (offlineSigningStatus.v1Signed) "v1 JAR" else null,
+                                            if (offlineSigningStatus.v2Signed) "v2 APK" else null,
+                                            if (offlineSigningStatus.v3Signed) "v3 APK" else null
+                                        ).forEach { scheme ->
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = palette.accentEmerald.copy(alpha = 0.14f),
+                                                border = BorderStroke(1.dp, palette.accentEmerald.copy(alpha = 0.5f))
+                                            ) {
+                                                Text(
+                                                    text = "$scheme ✓",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = palette.accentEmerald,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = "${offlineSigningStatus.signedApkSizeBytes / 1024} KB",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = JetBrainsMonoFamily,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
                             }
-                        },
-                        enabled = !isCloudBuildBusy,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (hasArtifactReady) palette.accentEmerald else MaterialTheme.colorScheme.primary,
-                            contentColor = if (hasArtifactReady) androidx.compose.ui.graphics.Color(0xFF04120B) else MaterialTheme.colorScheme.onPrimary
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp)
-                            .testTag("cloud_apk_build_button")
-                    ) {
-                        if (isCloudBuildBusy) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(
-                                imageVector = if (hasArtifactReady) Icons.Default.Download else Icons.Default.RocketLaunch,
-                                contentDescription = null
+                        }
+
+                        // Primary Offline AI Build, Repair & Signing CTA
+                        Button(
+                            onClick = {
+                                onOpenConsole()
+                                onTriggerOfflineAiBuildAndSign(signingAlias, signingPassword, signingCommonName)
+                            },
+                            enabled = !isAnyBuildBusy,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = palette.accentCyan,
+                                contentColor = Color(0xFF031018)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .testTag("offline_ai_build_sign_button")
+                        ) {
+                            if (isOfflineBuildBusy) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color(0xFF031018)
+                                )
+                            } else {
+                                Icon(Icons.Default.VerifiedUser, contentDescription = null)
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isOfflineBuildBusy) {
+                                    offlineBuildProgress ?: "Building & Signing Offline…"
+                                } else {
+                                    "Build, Fix & Sign Offline (AI)"
+                                },
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = when {
-                                isCloudBuildBusy -> "Building APK…"
-                                hasArtifactReady -> "Build & Install APK (Download)"
-                                else -> "Build & Install APK"
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilledTonalButton(
+                                onClick = {
+                                    pickApkToSignLauncher.launch(
+                                        arrayOf("application/vnd.android.package-archive", "application/octet-stream", "*/*")
+                                    )
+                                },
+                                enabled = !isAnyBuildBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .testTag("pick_apk_sign_offline_button")
+                            ) {
+                                Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Sign .APK File", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+
+                            if (hasOfflineSignedApk) {
+                                Button(
+                                    onClick = {
+                                        val uri = onGetOfflineSignedApkUri()
+                                        if (uri != null) launchApkInstaller(uri)
+                                    },
+                                    enabled = !isAnyBuildBusy,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = palette.accentEmerald,
+                                        contentColor = Color(0xFF04120B)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("install_offline_signed_apk_button")
+                                ) {
+                                    Icon(Icons.Default.InstallMobile, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Install Signed", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            } else {
+                                OutlinedButton(
+                                    onClick = onOpenConsole,
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("open_build_console_button")
+                                ) {
+                                    Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Console")
+                                }
+                            }
+                        }
+
+                        if (!offlineSigningStatus.aiEngineStatus.startsWith("Offline AI Ready")) {
+                            TextButton(onClick = onOpenSettings) {
+                                Text("Configure/Download Offline AI Model in Settings")
+                            }
+                        }
+                    } else {
+                        // Prominent "Build & Install APK" CTA (GitHub Actions Cloud CI)
+                        Button(
+                            onClick = {
+                                if (hasArtifactReady) {
+                                    scope.launch {
+                                        onOpenConsole()
+                                        val apkUri = onDownloadAndInstallApk()
+                                        if (apkUri != null) {
+                                            launchApkInstaller(apkUri)
+                                        } else {
+                                            uriHandler.openUri(project.lastArtifactUrl!!)
+                                        }
+                                    }
+                                } else {
+                                    onOpenConsole()
+                                    onTriggerCloudBuild()
+                                }
                             },
-                            fontWeight = FontWeight.Bold
+                            enabled = !isAnyBuildBusy,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (hasArtifactReady) palette.accentEmerald else MaterialTheme.colorScheme.primary,
+                                contentColor = if (hasArtifactReady) Color(0xFF04120B) else MaterialTheme.colorScheme.onPrimary
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .testTag("cloud_apk_build_button")
+                        ) {
+                            if (isCloudBuildBusy) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(
+                                    imageVector = if (hasArtifactReady) Icons.Default.Download else Icons.Default.RocketLaunch,
+                                    contentDescription = null
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = when {
+                                    isCloudBuildBusy -> cloudBuildProgress ?: "Building APK…"
+                                    hasArtifactReady -> "Download & Install APK"
+                                    else -> "Build & Install APK"
+                                },
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (project.gitHubRepoUrl != null) {
+                                OutlinedButton(
+                                    onClick = {
+                                        onOpenConsole()
+                                        onTriggerCloudBuild()
+                                    },
+                                    enabled = !isAnyBuildBusy,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("rebuild_apk_button")
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Rebuild APK")
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        val url = project.lastActionsUrl ?: "${project.gitHubRepoUrl}/actions"
+                                        uriHandler.openUri(url)
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                ) {
+                                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Actions")
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = onOpenConsole,
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .testTag("open_build_console_button")
+                            ) {
+                                Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Console")
+                            }
+                        }
+
+                        if (!hasGitHubPat) {
+                            TextButton(onClick = onOpenSettings) {
+                                Text("GitHub PAT missing — Tap to open Settings or switch to Offline AI")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (buildModeIndex == 0 && offlineSigningStatus.pipelineTasks.isNotEmpty()) {
+            item {
+                CyberGradientCard(
+                    cornerRadius = 18.dp,
+                    borderWidth = 1.4.dp,
+                    containerColor = palette.cardSurface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("offline_pipeline_tasks_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Local Compilation & Signing Tasks",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = buildString {
+                                    append(
+                                        offlineSigningStatus.pipelineOriginLabel
+                                            .ifBlank { "Offline Gradle + PKCS12 Pipeline" }
+                                    )
+                                    if (offlineSigningStatus.pipelineLatencyMs > 0L) {
+                                        append(" • ${offlineSigningStatus.pipelineLatencyMs} ms")
+                                    }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = palette.accentCyan,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = palette.accentEmerald.copy(alpha = 0.14f),
+                            border = BorderStroke(1.dp, palette.accentEmerald.copy(alpha = 0.45f))
+                        ) {
+                            Text(
+                                text = "0 GitHub",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = palette.accentEmerald,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            items(offlineSigningStatus.pipelineTasks.size) { index ->
+                val task = offlineSigningStatus.pipelineTasks[index]
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = palette.cardSurfaceHigh,
+                    border = BorderStroke(1.dp, palette.cardBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("offline_task_${task.name}")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = ":${task.name}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = if (task.generatedByMediaPipe) {
+                                    "${task.category} • AI"
+                                } else {
+                                    task.category
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (task.generatedByMediaPipe) palette.accentCyan else palette.accentEmerald
+                            )
+                        }
+                        Text(
+                            text = task.command,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFamily,
+                            color = palette.accentCyan,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = task.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                }
+            }
 
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        if (project.gitHubRepoUrl != null) {
-                            OutlinedButton(
-                                onClick = {
-                                    onOpenConsole()
-                                    onTriggerCloudBuild()
-                                },
-                                enabled = !isCloudBuildBusy,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .defaultMinSize(minHeight = 48.dp)
-                                    .testTag("rebuild_apk_button")
-                            ) {
-                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Rebuild APK")
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    val url = project.lastActionsUrl ?: "${project.gitHubRepoUrl}/actions"
-                                    uriHandler.openUri(url)
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .defaultMinSize(minHeight = 48.dp)
-                            ) {
-                                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Actions")
-                            }
-                        }
-
                         OutlinedButton(
-                            onClick = onOpenConsole,
+                            onClick = { showPipelineTasksCode = !showPipelineTasksCode },
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("toggle_offline_tasks_preview_button")
+                        ) {
+                            Icon(
+                                imageVector = if (showPipelineTasksCode) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (showPipelineTasksCode) "Hide Tasks Script" else "Inspect Gradle Tasks",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        FilledTonalButton(
+                            onClick = {
+                                onNavigateToFile(LocalMediaPipeBuildPipeline.GRADLE_PIPELINE_FILE_PATH, 1)
+                            },
                             modifier = Modifier
                                 .defaultMinSize(minHeight = 48.dp)
-                                .testTag("open_build_console_button")
+                                .testTag("open_offline_gradle_tasks_file_button")
                         ) {
-                            Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Console")
+                            Text("Open File")
                         }
                     }
 
-                    // Demo Preview Toggle for the Build Animation
-                    FilledTonalButton(
-                        onClick = { showBuildAnimationPreview = !showBuildAnimationPreview },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .defaultMinSize(minHeight = 48.dp)
-                            .testTag("preview_build_animation_button")
+                    AnimatedVisibility(
+                        visible = showPipelineTasksCode && offlineSigningStatus.pipelineTasksScript.isNotBlank()
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Speed,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (showBuildAnimationPreview) "Stop Animation Preview" else "Preview Build Animation (Rotating Gears & Code)"
-                        )
-                    }
-
-                    if (!hasGitHubPat) {
-                        TextButton(onClick = onOpenSettings) {
-                            Text("GitHub PAT missing — Tap to open Settings")
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = palette.cardSurface,
+                            border = BorderStroke(1.dp, palette.cardBorder),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("offline_pipeline_script_preview")
+                        ) {
+                            Text(
+                                text = offlineSigningStatus.pipelineTasksScript,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = JetBrainsMonoFamily,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(10.dp)
+                            )
                         }
                     }
                 }
